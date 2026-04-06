@@ -1,0 +1,25 @@
+[project]
+name = "signalrank-ai"
+version = "0.1.0"
+description = "SignalRank AI: monitor AI industry hotspots and rank them by CV relevance and industry impact."
+requires-python = ">=3.11"
+dependencies = [
+  "beautifulsoup4>=4.12.3",
+  "openai>=1.109.1",
+  "pypdf>=5.4.0",
+  "python-docx>=1.1.2",
+  "scikit-learn>=1.6.1",
+]
+
+[project.scripts]
+ai-hotspot-monitor = "ai_hotspot_monitor.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"

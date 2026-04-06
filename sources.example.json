@@ -1,0 +1,39 @@
+{
+  "sources": [
+    {
+      "name": "OpenAI News",
+      "kind": "rss",
+      "url": "https://openai.com/news/rss.xml",
+      "authority_weight": 0.95,
+      "tags": ["labs", "foundation-models"]
+    },
+    {
+      "name": "Anthropic News",
+      "kind": "rss",
+      "url": "https://www.anthropic.com/news/rss.xml",
+      "authority_weight": 0.92,
+      "tags": ["labs", "safety", "agents"]
+    },
+    {
+      "name": "Google DeepMind Blog",
+      "kind": "rss",
+      "url": "https://deepmind.google/blog/rss.xml",
+      "authority_weight": 0.93,
+      "tags": ["research", "multimodal"]
+    },
+    {
+      "name": "Hugging Face Blog",
+      "kind": "rss",
+      "url": "https://huggingface.co/blog/feed.xml",
+      "authority_weight": 0.86,
+      "tags": ["open-source", "tooling"]
+    },
+    {
+      "name": "ArXiv cs.AI Feed",
+      "kind": "rss",
+      "url": "https://arxiv.org/rss/cs.AI",
+      "authority_weight": 0.82,
+      "tags": ["papers", "research"]
+    }
+  ]
+}

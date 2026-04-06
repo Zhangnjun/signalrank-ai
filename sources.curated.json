@@ -1,0 +1,81 @@
+{
+  "sources": [
+    {
+      "name": "OpenAI News",
+      "kind": "rss",
+      "url": "https://openai.com/news/rss.xml",
+      "authority_weight": 0.98,
+      "tags": ["frontier-lab", "product", "policy"]
+    },
+    {
+      "name": "Google DeepMind Blog",
+      "kind": "rss",
+      "url": "https://deepmind.google/blog/rss.xml",
+      "authority_weight": 0.96,
+      "tags": ["frontier-lab", "research", "agents"]
+    },
+    {
+      "name": "Microsoft AI Blog",
+      "kind": "rss",
+      "url": "https://blogs.microsoft.com/ai?feed=rss2",
+      "authority_weight": 0.93,
+      "tags": ["platform", "enterprise", "copilot"]
+    },
+    {
+      "name": "Meta Newsroom",
+      "kind": "rss",
+      "url": "https://about.fb.com/news/feed/",
+      "authority_weight": 0.9,
+      "tags": ["frontier-lab", "open-models", "consumer-ai"]
+    },
+    {
+      "name": "NVIDIA Developer Blog",
+      "kind": "atom",
+      "url": "https://developer.nvidia.com/blog/feed",
+      "authority_weight": 0.95,
+      "tags": ["infra", "inference", "training", "hardware"]
+    },
+    {
+      "name": "NVIDIA AI Platforms News",
+      "kind": "rss",
+      "url": "https://nvidianews.nvidia.com/cats/ai_platforms_deployment.xml",
+      "authority_weight": 0.91,
+      "tags": ["enterprise", "infrastructure", "deployment"]
+    },
+    {
+      "name": "Hugging Face Blog",
+      "kind": "rss",
+      "url": "https://huggingface.co/blog/feed.xml",
+      "authority_weight": 0.88,
+      "tags": ["open-source", "tooling", "agents"]
+    },
+    {
+      "name": "ArXiv cs.AI",
+      "kind": "rss",
+      "url": "https://rss.arxiv.org/rss/cs.AI",
+      "authority_weight": 0.82,
+      "tags": ["papers", "research", "academic"]
+    },
+    {
+      "name": "ArXiv cs.LG",
+      "kind": "rss",
+      "url": "https://rss.arxiv.org/rss/cs.LG",
+      "authority_weight": 0.8,
+      "tags": ["papers", "ml", "research"]
+    },
+    {
+      "name": "ArXiv cs.CL",
+      "kind": "rss",
+      "url": "https://rss.arxiv.org/rss/cs.CL",
+      "authority_weight": 0.8,
+      "tags": ["papers", "llm", "nlp"]
+    },
+    {
+      "name": "ArXiv cs.CV",
+      "kind": "rss",
+      "url": "https://rss.arxiv.org/rss/cs.CV",
+      "authority_weight": 0.78,
+      "tags": ["papers", "vision", "multimodal"]
+    }
+  ]
+}
