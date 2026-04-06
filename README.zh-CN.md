@@ -1,5 +1,7 @@
 # SignalRank AI
 
+English documentation: [README.md](./README.md)
+
 SignalRank AI 是一个面向 AI 行业的信息监控与排序工具。
 
 它会读取一份简历或 CV，然后抓取 AI 新闻、实验室公告、工程博客和论文动态，并从以下几个维度对内容进行排序：

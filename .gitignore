@@ -1,0 +1,11 @@
+.DS_Store
+.venv/
+build/
+dist/
+reports/
+reports-smoke/
+reports-curated-smoke/
+sources.json
+examples/
+__pycache__/
+*.pyc
