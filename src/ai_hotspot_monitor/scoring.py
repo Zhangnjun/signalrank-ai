@@ -44,6 +44,22 @@ STOPWORDS = {
     "负责",
     "参与",
 }
+LOW_SIGNAL_TITLE_TERMS = {
+    "creator",
+    "creators",
+    "whatsapp",
+    "instagram",
+    "facebook",
+    "audience",
+    "messenger",
+    "threads",
+    "reels",
+    "marketing",
+    "advertisers",
+    "ads",
+    "shopping",
+    "consumer",
+}
 
 
 def build_resume_profile(resume_text: str, max_terms: int = 18) -> ResumeProfile:
@@ -234,6 +250,9 @@ def _noise_penalty(article: Article) -> float:
         penalty += 10.0
     if len(set(title.lower().split())) <= 3:
         penalty += 6.0
+    title_tokens = {token.lower() for token in TOKEN_PATTERN.findall(title)}
+    if title_tokens & LOW_SIGNAL_TITLE_TERMS:
+        penalty += 16.0
     return penalty
 
 

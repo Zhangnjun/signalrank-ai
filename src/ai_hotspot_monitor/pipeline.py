@@ -130,6 +130,8 @@ class MonitorPipeline:
             ),
             reverse=True,
         )
+        for item in ranked:
+            item.action_bucket = _action_bucket(item)
         ranked = ranked[:top_n]
         kept = sum(1 for item in ranked if item.keep)
 
@@ -189,19 +191,33 @@ class MonitorPipeline:
 
 
 class AiHotspotEvaluator:
-    def __init__(self, api_key_env: str, model: str, embedding_model: str) -> None:
+    def __init__(
+        self,
+        api_key: str | None,
+        api_key_env: str,
+        model: str,
+        embedding_model: str,
+        generation_api: str = "responses",
+        base_url: str | None = None,
+    ) -> None:
         try:
             from openai import OpenAI
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
                 "OpenAI package is not installed. Install dependencies or disable --ai-evaluate."
             ) from exc
-        api_key = os.getenv(api_key_env)
+        api_key = api_key or os.getenv(api_key_env)
         if not api_key:
-            raise ValueError(f"Environment variable {api_key_env} is required for AI hotspot evaluation.")
-        self.client = OpenAI(api_key=api_key)
+            raise ValueError(
+                f"Either --openai-api-key or environment variable {api_key_env} is required for AI hotspot evaluation."
+            )
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self.client = OpenAI(**client_kwargs)
         self.model = model
         self.embedding_model = embedding_model
+        self.generation_api = generation_api
 
     def apply_embedding_rerank(self, profile: ResumeProfile, ranked_articles: list[RankedArticle]) -> None:
         if not ranked_articles:
@@ -236,71 +252,72 @@ class AiHotspotEvaluator:
 
     def evaluate(self, profile: ResumeProfile, ranked_article: RankedArticle) -> AiAssessment:
         article = ranked_article.article
-        response = self.client.responses.create(
-            model=self.model,
-            store=False,
-            instructions=(
-                "You are ranking AI industry hotspots for an engineer. "
-                "Judge a single article on three axes: resume relevance, industry impact, and content quality. "
-                "Avoid hand-written keyword heuristics. Infer from the resume direction, article substance, source authority, and likely engineering value. "
-                "If the article is mostly hype, market noise, or has weak technical substance, lower quality sharply. "
-                "Keep globally important AI events even if resume relevance is low. Return JSON only."
-            ),
-            input=(
-                f"Resume focus summary: {profile.focus_summary}\n"
-                f"Resume salient terms: {', '.join(profile.salient_terms[:18])}\n\n"
-                f"Article title: {article.title}\n"
-                f"Source: {article.source_name}\n"
-                f"Published: {article.published}\n"
-                f"Source tags: {', '.join(article.tags)}\n"
-                f"Local relevance score: {ranked_article.local_score.relevance_score}\n"
-                f"Local impact score: {ranked_article.local_score.impact_score}\n"
-                f"Local quality score: {ranked_article.local_score.quality_score}\n"
-                f"Local discovery score: {ranked_article.local_score.discovery_score}\n"
-                f"Embedding score: {ranked_article.embedding_score}\n"
-                f"Topic cluster size: {ranked_article.topic_cluster_size}\n"
-                f"Duplicate count: {ranked_article.duplicate_count}\n\n"
-                f"Article summary:\n{ranked_article.generated_summary[:1200]}\n\n"
-                f"Article content:\n{article.content[:6000]}"
-            ),
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "hotspot_assessment",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "keep": {"type": "boolean"},
-                            "keep_reason": {"type": "string"},
-                            "relevance_score": {"type": "number"},
-                            "impact_score": {"type": "number"},
-                            "quality_score": {"type": "number"},
-                            "discovery_score": {"type": "number"},
-                            "industry_heavyweight": {"type": "boolean"},
-                            "summary": {"type": "string"},
-                            "tags": {"type": "array", "items": {"type": "string"}}
-                        },
-                        "required": [
-                            "keep",
-                            "keep_reason",
-                            "relevance_score",
-                            "impact_score",
-                            "quality_score",
-                            "discovery_score",
-                            "industry_heavyweight",
-                            "summary",
-                            "tags"
-                        ],
-                        "additionalProperties": False
-                    }
-                }
-            },
+        instructions = (
+            "You are ranking AI industry hotspots for an engineer. "
+            "Judge a single article on three axes: resume relevance, industry impact, and content quality. "
+            "Avoid hand-written keyword heuristics. Infer from the resume direction, article substance, source authority, and likely engineering value. "
+            "Classify the article content kind before deciding keep. Use one of: infra-platform, agent-tooling, research-paper, enterprise-product, consumer-newsroom, market-commentary, other. "
+            "Use one retention class from: resume-fit, industry-heavyweight, demo-potential, interview-material, watchlist. "
+            "Consumer-newsroom content, creator features, messaging product updates, and general audience product news should be demoted unless they clearly change the AI engineering landscape. "
+            "If the article is mostly hype, market noise, or has weak technical substance, lower quality sharply. "
+            "Keep globally important AI events even if resume relevance is low. Return JSON only."
         )
-        payload = json.loads(response.output_text)
+        prompt = (
+            f"Resume focus summary: {profile.focus_summary}\n"
+            f"Resume salient terms: {', '.join(profile.salient_terms[:18])}\n\n"
+            f"Article title: {article.title}\n"
+            f"Source: {article.source_name}\n"
+            f"Published: {article.published}\n"
+            f"Source tags: {', '.join(article.tags)}\n"
+            f"Local relevance score: {ranked_article.local_score.relevance_score}\n"
+            f"Local impact score: {ranked_article.local_score.impact_score}\n"
+            f"Local quality score: {ranked_article.local_score.quality_score}\n"
+            f"Local discovery score: {ranked_article.local_score.discovery_score}\n"
+            f"Embedding score: {ranked_article.embedding_score}\n"
+            f"Topic cluster size: {ranked_article.topic_cluster_size}\n"
+            f"Duplicate count: {ranked_article.duplicate_count}\n\n"
+            f"Article summary:\n{ranked_article.generated_summary[:1200]}\n\n"
+            f"Article content:\n{article.content[:6000]}"
+        )
+        schema = {
+            "type": "object",
+            "properties": {
+                "keep": {"type": "boolean"},
+                "keep_reason": {"type": "string"},
+                "retention_class": {"type": "string"},
+                "content_kind": {"type": "string"},
+                "relevance_score": {"type": "number"},
+                "impact_score": {"type": "number"},
+                "quality_score": {"type": "number"},
+                "discovery_score": {"type": "number"},
+                "industry_heavyweight": {"type": "boolean"},
+                "summary": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": [
+                "keep",
+                "keep_reason",
+                "retention_class",
+                "content_kind",
+                "relevance_score",
+                "impact_score",
+                "quality_score",
+                "discovery_score",
+                "industry_heavyweight",
+                "summary",
+                "tags",
+            ],
+            "additionalProperties": False,
+        }
+        if self.generation_api == "chat-completions":
+            payload = self._evaluate_via_chat_completions(instructions, prompt, schema)
+        else:
+            payload = self._evaluate_via_responses(instructions, prompt, schema)
         return AiAssessment(
             keep=bool(payload["keep"]),
             keep_reason=payload["keep_reason"],
+            retention_class=payload["retention_class"],
+            content_kind=payload["content_kind"],
             relevance_score=round(float(payload["relevance_score"]), 2),
             impact_score=round(float(payload["impact_score"]), 2),
             quality_score=round(float(payload["quality_score"]), 2),
@@ -310,6 +327,42 @@ class AiHotspotEvaluator:
             summary=payload["summary"],
             tags=payload["tags"],
         )
+
+    def _evaluate_via_responses(self, instructions: str, prompt: str, schema: dict) -> dict:
+        response = self.client.responses.create(
+            model=self.model,
+            store=False,
+            instructions=instructions,
+            input=prompt,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "hotspot_assessment",
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
+        )
+        return json.loads(response.output_text)
+
+    def _evaluate_via_chat_completions(self, instructions: str, prompt: str, schema: dict) -> dict:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": instructions},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "hotspot_assessment",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        )
+        content = response.choices[0].message.content or "{}"
+        return json.loads(content)
 
 
 def _prefer_article(left: Article, right: Article) -> Article:
@@ -336,3 +389,15 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
     if left_norm == 0 or right_norm == 0:
         return 0.0
     return max(0.0, min(1.0, numerator / (left_norm * right_norm)))
+
+
+def _action_bucket(item: RankedArticle) -> str:
+    if not item.keep:
+        return "watchlist"
+    if item.final_relevance_score >= 55 and item.final_quality_score >= 60:
+        return "worth-reading-now"
+    if item.final_relevance_score >= 40 and item.final_quality_score >= 55:
+        return "demo-candidate"
+    if item.final_impact_score >= 75 or item.local_score.industry_heavyweight:
+        return "industry-watch"
+    return "watchlist"

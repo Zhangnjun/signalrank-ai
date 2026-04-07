@@ -69,11 +69,22 @@ signalrank-ai/
 
 ## 快速开始
 
+macOS / Linux：
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 cp sources.curated.json sources.json
+```
+
+Windows PowerShell：
+
+```powershell
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e .
+Copy-Item sources.curated.json sources.json
 ```
 
 本地模式运行：
@@ -96,6 +107,33 @@ ai-hotspot-monitor \
   --embedding-model text-embedding-3-small \
   --ai-candidate-pool 20 \
   --ai-top-k 8 \
+  --ai-model gpt-5-mini
+```
+
+也可以直接通过参数传 API Key：
+
+```bash
+ai-hotspot-monitor \
+  --resume ./path/to/resume.md \
+  --sources ./sources.json \
+  --ai-evaluate \
+  --openai-api-key your_key \
+  --embedding-model text-embedding-3-small \
+  --ai-model gpt-5-mini
+```
+
+如果公司内部部署了 OpenAI 兼容网关，也可以这样调用：
+
+```bash
+export OPENAI_API_KEY="your_key"
+
+ai-hotspot-monitor \
+  --resume ./path/to/resume.md \
+  --sources ./sources.json \
+  --ai-evaluate \
+  --openai-base-url http://your-company-gateway/v1 \
+  --generation-api chat-completions \
+  --embedding-model text-embedding-3-small \
   --ai-model gpt-5-mini
 ```
 
@@ -128,6 +166,8 @@ ai-hotspot-monitor \
 - 最终评分
 - 可选 embedding 分
 - 保留决策与保留原因
+- 保留类别，例如 `resume-fit`、`industry-heavyweight`、`demo-potential`、`interview-material`
+- 内容类型，例如 `infra-platform`、`agent-tooling`、`research-paper`、`consumer-newsroom`
 - 是否属于行业级重磅事件
 
 ## 工作原理
@@ -209,6 +249,12 @@ ai-hotspot-monitor \
   embedding 阶段处理多少个候选
 - `--ai-top-k`
   LLM 最终处理多少条
+- `--generation-api`
+  指定 AI 重排阶段使用 `responses` 还是 `chat-completions`。如果公司网关不支持 `/v1/responses`，就切到 `chat-completions`。
+- `--openai-api-key`
+  直接传入 API Key。若同时设置了环境变量，则优先使用该参数。
+- `--openai-base-url`
+  可选的 OpenAI 兼容调用地址，适合公司内部网关、代理或兼容部署。
 
 ## 适用场景
 

@@ -68,6 +68,8 @@ class LocalScore:
 class AiAssessment:
     keep: bool
     keep_reason: str
+    retention_class: str
+    content_kind: str
     relevance_score: float
     impact_score: float
     quality_score: float
@@ -93,6 +95,7 @@ class RankedArticle:
     generated_summary: str = ""
     matched_resume_terms: list[str] = field(default_factory=list)
     embedding_score: float = 0.0
+    action_bucket: str = "watchlist"
 
     @property
     def keep(self) -> bool:

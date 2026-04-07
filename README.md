@@ -70,11 +70,22 @@ signalrank-ai/
 
 ## Quick Start
 
+macOS / Linux:
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 cp sources.curated.json sources.json
+```
+
+Windows PowerShell:
+
+```powershell
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -e .
+Copy-Item sources.curated.json sources.json
 ```
 
 Run a local-only pass:
@@ -97,6 +108,33 @@ ai-hotspot-monitor \
   --embedding-model text-embedding-3-small \
   --ai-candidate-pool 20 \
   --ai-top-k 8 \
+  --ai-model gpt-5-mini
+```
+
+Run with a direct API key argument:
+
+```bash
+ai-hotspot-monitor \
+  --resume ./path/to/resume.md \
+  --sources ./sources.json \
+  --ai-evaluate \
+  --openai-api-key your_key \
+  --embedding-model text-embedding-3-small \
+  --ai-model gpt-5-mini
+```
+
+Run with an OpenAI-compatible company gateway:
+
+```bash
+export OPENAI_API_KEY="your_key"
+
+ai-hotspot-monitor \
+  --resume ./path/to/resume.md \
+  --sources ./sources.json \
+  --ai-evaluate \
+  --openai-base-url http://your-company-gateway/v1 \
+  --generation-api chat-completions \
+  --embedding-model text-embedding-3-small \
   --ai-model gpt-5-mini
 ```
 
@@ -129,6 +167,8 @@ Each record includes:
 - final scores
 - optional embedding score
 - keep decision and keep reason
+- retention class such as `resume-fit`, `industry-heavyweight`, `demo-potential`, or `interview-material`
+- content kind such as `infra-platform`, `agent-tooling`, `research-paper`, or `consumer-newsroom`
 - heavyweight-event flag
 
 ## How It Works
@@ -211,6 +251,12 @@ This makes the system much more practical than either:
   Number of locally recalled items to send through embeddings.
 - `--ai-top-k`
   Number of items to send to the LLM after embedding rerank.
+- `--generation-api`
+  Choose `responses` or `chat-completions` for the AI rerank stage. Use `chat-completions` for gateways that do not support `/v1/responses`.
+- `--openai-api-key`
+  Direct API key input. Overrides the environment-variable lookup.
+- `--openai-base-url`
+  Optional OpenAI-compatible base URL. Useful for company-hosted gateways, proxies, or compatible deployments.
 
 ## Suitable Use Cases
 

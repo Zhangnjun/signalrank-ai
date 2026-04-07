@@ -36,7 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ai-candidate-pool", type=int, default=20, help="How many locally recalled items to send through embedding rerank before LLM evaluation.")
     parser.add_argument("--ai-model", default="gpt-5-mini", help="OpenAI model for refinement.")
     parser.add_argument("--embedding-model", default="text-embedding-3-small", help="OpenAI embedding model for semantic rerank.")
+    parser.add_argument("--generation-api", default="responses", choices=["responses", "chat-completions"], help="Generation API for AI rerank. Use chat-completions for OpenAI-compatible gateways that do not support /v1/responses.")
+    parser.add_argument("--openai-api-key", default="", help="Direct OpenAI API key. Overrides the environment variable if both are provided.")
     parser.add_argument("--openai-api-key-env", default="OPENAI_API_KEY", help="Environment variable with OpenAI API key.")
+    parser.add_argument("--openai-base-url", default="", help="Optional OpenAI-compatible base URL for company gateways or self-hosted proxies.")
     return parser
 
 
@@ -45,7 +48,16 @@ def main() -> None:
     resume_text = load_resume_text(args.resume)
     sources = load_sources(args.sources)
     ai_evaluator = (
-        AiHotspotEvaluator(args.openai_api_key_env, args.ai_model, args.embedding_model) if args.ai_evaluate else None
+        AiHotspotEvaluator(
+            args.openai_api_key or None,
+            args.openai_api_key_env,
+            args.ai_model,
+            args.embedding_model,
+            args.generation_api,
+            args.openai_base_url or None,
+        )
+        if args.ai_evaluate
+        else None
     )
     pipeline = MonitorPipeline(ai_evaluator=ai_evaluator)
     result = pipeline.run(
@@ -113,6 +125,9 @@ def _to_record(item) -> dict:
         "source_name": article.source_name,
         "published": article.published,
         "summary": item.generated_summary,
+        "action_bucket": item.action_bucket,
+        "retention_class": ai.retention_class if ai else _retention_class_from_bucket(item.action_bucket),
+        "content_kind": ai.content_kind if ai else "unknown",
         "matched_resume_terms": item.matched_resume_terms,
         "duplicate_count": item.duplicate_count,
         "topic_cluster_size": item.topic_cluster_size,
@@ -157,6 +172,7 @@ def _build_markdown(result, records: list[dict], args) -> str:
 
     kept = [item for item in records if item["keep"]]
     dropped = [item for item in records if not item["keep"]]
+    bucket_order = ["worth-reading-now", "demo-candidate", "industry-watch", "watchlist"]
 
     if not records:
         lines.append("No items were collected.")
@@ -165,8 +181,15 @@ def _build_markdown(result, records: list[dict], args) -> str:
     lines.extend(["## Kept Items", ""])
     if not kept:
         lines.append("No items passed the current thresholds.")
-    for idx, item in enumerate(kept, start=1):
-        lines.extend(_markdown_block(idx, item))
+    else:
+        visible_kept = [item for item in kept if item["action_bucket"] != "watchlist"]
+        for bucket in bucket_order:
+            bucket_items = [item for item in visible_kept if item["action_bucket"] == bucket]
+            if not bucket_items:
+                continue
+            lines.extend([f"### {bucket}", ""])
+            for idx, item in enumerate(bucket_items, start=1):
+                lines.extend(_markdown_block(idx, item))
 
     if dropped:
         lines.extend(["## Dropped Items", ""])
@@ -182,6 +205,9 @@ def _markdown_block(idx: int, item: dict) -> list[str]:
         "",
         f"- Keep: {item['keep']}",
         f"- Keep reason: {item['keep_reason']}",
+        f"- Action bucket: {item['action_bucket']}",
+        f"- Retention class: {item['retention_class']}",
+        f"- Content kind: {item['content_kind']}",
         f"- Source: {item['source_name']}",
         f"- Published: {item['published'] or 'unknown'}",
         f"- URL: {item['url']}",
@@ -201,3 +227,13 @@ def _markdown_block(idx: int, item: dict) -> list[str]:
 
 if __name__ == "__main__":
     main()
+
+
+def _retention_class_from_bucket(bucket: str) -> str:
+    mapping = {
+        "worth-reading-now": "resume-fit",
+        "demo-candidate": "demo-potential",
+        "industry-watch": "industry-heavyweight",
+        "watchlist": "watchlist",
+    }
+    return mapping.get(bucket, "watchlist")
