@@ -131,11 +131,16 @@ ai-hotspot-monitor \
   --resume ./path/to/resume.md \
   --sources ./sources.json \
   --ai-evaluate \
+  --openai-api-key your_chat_key \
   --openai-base-url http://your-company-gateway/v1 \
   --generation-api chat-completions \
-  --embedding-model text-embedding-3-small \
-  --ai-model gpt-5-mini
+  --ai-model qwen3.5 \
+  --embedding-model your-embedding-model \
+  --embedding-api-key your_embedding_key \
+  --embedding-base-url http://your-embedding-gateway/v1
 ```
+
+如果 embedding endpoint 不可用或运行时报错，流水线会自动退化为 `chat-only` 模式，而不是直接退出。
 
 ## 信源配置
 
@@ -165,6 +170,7 @@ ai-hotspot-monitor \
 - 本地评分
 - 最终评分
 - 可选 embedding 分
+- refinement mode，可能是 `disabled`、`chat-only` 或 `full`
 - 保留决策与保留原因
 - 保留类别，例如 `resume-fit`、`industry-heavyweight`、`demo-potential`、`interview-material`
 - 内容类型，例如 `infra-platform`、`agent-tooling`、`research-paper`、`consumer-newsroom`
@@ -219,8 +225,10 @@ ai-hotspot-monitor \
 开启 `--ai-evaluate` 后，流程会变成：
 
 1. 本地评分做宽召回
-2. 用 embedding 对候选做语义重排
+2. 如果 embedding 可用，则先做语义重排
 3. 再把前一部分候选交给 LLM 做结构化最终判断
+
+如果 embedding 不可用，系统会退化到 `chat-only` 模式并继续完成任务。
 
 这比下面两种方式都更实用：
 
@@ -249,10 +257,16 @@ ai-hotspot-monitor \
   embedding 阶段处理多少个候选
 - `--ai-top-k`
   LLM 最终处理多少条
+- `--embedding-api-key`
+  embedding endpoint 使用的 API key
+- `--embedding-api-key-env`
+  embedding API key 对应的环境变量名
+- `--embedding-base-url`
+  embedding endpoint 使用的 OpenAI-compatible base URL
 - `--generation-api`
   指定 AI 重排阶段使用 `responses` 还是 `chat-completions`。如果公司网关不支持 `/v1/responses`，就切到 `chat-completions`。
 - `--openai-api-key`
-  直接传入 API Key。若同时设置了环境变量，则优先使用该参数。
+  chat/generation endpoint 使用的 API key。若同时设置了环境变量，则优先使用该参数。
 - `--openai-base-url`
   可选的 OpenAI 兼容调用地址，适合公司内部网关、代理或兼容部署。
 

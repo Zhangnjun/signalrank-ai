@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 from ai_hotspot_monitor.config import load_sources
 from ai_hotspot_monitor.pipeline import AiHotspotEvaluator, MonitorPipeline
 from ai_hotspot_monitor.resume import load_resume_text
+
+
+LOGGER = logging.getLogger("ai_hotspot_monitor")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,35 +35,59 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-dir", default="reports", help="Directory for report files.")
     parser.add_argument("--json-only", action="store_true", help="Only generate JSON report.")
-    parser.add_argument("--ai-evaluate", action="store_true", help="Use OpenAI to refine the top articles.")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Logging verbosity.")
+
+    parser.add_argument("--ai-evaluate", action="store_true", help="Use AI to refine the top articles.")
     parser.add_argument("--ai-top-k", type=int, default=8, help="How many ranked items to send to the AI evaluator.")
-    parser.add_argument("--ai-candidate-pool", type=int, default=20, help="How many locally recalled items to send through embedding rerank before LLM evaluation.")
-    parser.add_argument("--ai-model", default="gpt-5-mini", help="OpenAI model for refinement.")
-    parser.add_argument("--embedding-model", default="text-embedding-3-small", help="OpenAI embedding model for semantic rerank.")
-    parser.add_argument("--generation-api", default="responses", choices=["responses", "chat-completions"], help="Generation API for AI rerank. Use chat-completions for OpenAI-compatible gateways that do not support /v1/responses.")
-    parser.add_argument("--openai-api-key", default="", help="Direct OpenAI API key. Overrides the environment variable if both are provided.")
-    parser.add_argument("--openai-api-key-env", default="OPENAI_API_KEY", help="Environment variable with OpenAI API key.")
-    parser.add_argument("--openai-base-url", default="", help="Optional OpenAI-compatible base URL for company gateways or self-hosted proxies.")
+    parser.add_argument("--ai-candidate-pool", type=int, default=20, help="How many locally recalled items to send through embedding rerank before final AI evaluation.")
+    parser.add_argument("--generation-api", default="responses", choices=["responses", "chat-completions"], help="Generation API for AI rerank. Use chat-completions for gateways that do not support /v1/responses.")
+
+    parser.add_argument("--ai-model", default="gpt-5-mini", help="Chat/generation model for refinement.")
+    parser.add_argument("--openai-api-key", default="", help="Direct chat API key. Overrides the environment variable if both are provided.")
+    parser.add_argument("--openai-api-key-env", default="OPENAI_API_KEY", help="Environment variable with chat API key.")
+    parser.add_argument("--openai-base-url", default="", help="Optional OpenAI-compatible base URL for the chat/generation endpoint.")
+
+    parser.add_argument("--embedding-model", default="text-embedding-3-small", help="Embedding model for semantic rerank.")
+    parser.add_argument("--embedding-api-key", default="", help="Direct embedding API key. Overrides the embedding environment variable if both are provided.")
+    parser.add_argument("--embedding-api-key-env", default="OPENAI_EMBEDDING_API_KEY", help="Environment variable with embedding API key.")
+    parser.add_argument("--embedding-base-url", default="", help="Optional OpenAI-compatible base URL for the embedding endpoint.")
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
+    _configure_logging(args.log_level)
+
+    LOGGER.info(
+        "CLI configuration loaded: ai_evaluate=%s generation_api=%s ai_model=%s embedding_model=%s chat_base_url=%s embedding_base_url=%s",
+        args.ai_evaluate,
+        args.generation_api,
+        args.ai_model,
+        args.embedding_model,
+        args.openai_base_url or "<default>",
+        args.embedding_base_url or args.openai_base_url or "<default>",
+    )
+
     resume_text = load_resume_text(args.resume)
     sources = load_sources(args.sources)
-    ai_evaluator = (
-        AiHotspotEvaluator(
-            args.openai_api_key or None,
-            args.openai_api_key_env,
-            args.ai_model,
-            args.embedding_model,
-            args.generation_api,
-            args.openai_base_url or None,
+    ai_evaluator = None
+    if args.ai_evaluate:
+        ai_evaluator = AiHotspotEvaluator(
+            chat_api_key=args.openai_api_key or None,
+            chat_api_key_env=args.openai_api_key_env,
+            chat_model=args.ai_model,
+            embedding_model=args.embedding_model,
+            generation_api=args.generation_api,
+            chat_base_url=args.openai_base_url or None,
+            embedding_api_key=args.embedding_api_key or None,
+            embedding_api_key_env=args.embedding_api_key_env,
+            embedding_base_url=args.embedding_base_url or None,
+            logger=LOGGER,
         )
-        if args.ai_evaluate
-        else None
-    )
-    pipeline = MonitorPipeline(ai_evaluator=ai_evaluator)
+    else:
+        LOGGER.info("AI evaluate disabled; running local scoring only.")
+
+    pipeline = MonitorPipeline(ai_evaluator=ai_evaluator, logger=LOGGER)
     result = pipeline.run(
         resume_text=resume_text,
         sources=sources,
@@ -73,9 +101,11 @@ def main() -> None:
     )
     markdown_path, json_path = write_reports(result, args)
 
+    LOGGER.info("Report generation complete: refinement_mode=%s markdown=%s json=%s", result.stats.refinement_mode, markdown_path, json_path)
     print(f"Fetched: {result.stats.fetched_count}")
     print(f"After dedupe: {result.stats.deduped_count}")
     print(f"Kept: {result.stats.kept_count}")
+    print(f"AI refinement mode: {result.stats.refinement_mode}")
     if markdown_path:
         print(f"Markdown report: {markdown_path}")
     print(f"JSON report: {json_path}")
@@ -100,6 +130,7 @@ def write_reports(result, args) -> tuple[Path | None, Path]:
                     "deduped_count": result.stats.deduped_count,
                     "kept_count": result.stats.kept_count,
                     "discarded_count": result.stats.discarded_count,
+                    "refinement_mode": result.stats.refinement_mode,
                 },
                 "items": records,
             },
@@ -165,7 +196,7 @@ def _build_markdown(result, records: list[dict], args) -> str:
         f"- Resume salient terms: {', '.join(result.profile.salient_terms[:18])}",
         f"- Sources config: {Path(args.sources).expanduser().resolve()}",
         f"- Fetched / deduped / kept: {result.stats.fetched_count} / {result.stats.deduped_count} / {result.stats.kept_count}",
-        f"- AI refinement: {'enabled' if args.ai_evaluate else 'disabled'}",
+        f"- AI refinement: {result.stats.refinement_mode}",
         f"- Thresholds: min_relevance={args.min_relevance}, min_quality={args.min_quality}, heavyweight_impact={args.heavyweight_impact}",
         "",
     ]
@@ -225,10 +256,6 @@ def _markdown_block(idx: int, item: dict) -> list[str]:
     ]
 
 
-if __name__ == "__main__":
-    main()
-
-
 def _retention_class_from_bucket(bucket: str) -> str:
     mapping = {
         "worth-reading-now": "resume-fit",
@@ -237,3 +264,14 @@ def _retention_class_from_bucket(bucket: str) -> str:
         "watchlist": "watchlist",
     }
     return mapping.get(bucket, "watchlist")
+
+
+def _configure_logging(level_name: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, level_name.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+
+if __name__ == "__main__":
+    main()

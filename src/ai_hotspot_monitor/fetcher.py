@@ -1,34 +1,64 @@
 from __future__ import annotations
 
+import json
+import logging
+import re
+import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from html import unescape
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 from urllib.parse import urlparse
-import json
-import xml.etree.ElementTree as ET
+from urllib.request import Request, urlopen
 
 from bs4 import BeautifulSoup
 
 from ai_hotspot_monitor.models import Article, Source
 
+
+LOGGER = logging.getLogger("ai_hotspot_monitor")
 USER_AGENT = "Mozilla/5.0 (compatible; ai-hotspot-monitor/0.1; +https://example.local)"
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
 CONTENT_CANDIDATES = [
     "article",
+    "main article",
     "main",
+    "[role='main'] article",
     "[role='main']",
+    "[class*='article-body']",
+    "[class*='article-content']",
+    "[class*='post-content']",
+    "[class*='entry-content']",
+    "[class*='content-body']",
     "[class*='content']",
     "[class*='article']",
     "[class*='post']",
-    "[class*='body']",
     "body",
+]
+NOISE_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"^skip to main content$",
+        r"^main menu$",
+        r"^table of contents$",
+        r"^back to top$",
+        r"^sign in$",
+        r"^log in$",
+        r"^subscribe$",
+        r"^privacy policy$",
+        r"^terms of use$",
+        r"^all rights reserved$",
+        r"^cookie(s)?$",
+        r"^share$",
+        r"^copy link$",
+        r"^follow$",
+    ]
 ]
 
 
 class ArticleFetcher:
-    def __init__(self, timeout: int = 20) -> None:
+    def __init__(self, timeout: int = 20, logger: logging.Logger | None = None) -> None:
         self.timeout = timeout
+        self.logger = logger or LOGGER
 
     def fetch(self, source: Source, default_limit: int) -> list[Article]:
         if source.kind in {"rss", "atom"}:
@@ -50,7 +80,7 @@ class ArticleFetcher:
         for item in items:
             url = _find_text(item, "link")
             title = _find_text(item, "title")
-            summary = _html_to_text(_find_text(item, "description"))
+            summary = _clean_text(_html_to_text(_find_text(item, "description")))
             published = _normalize_published(_find_text(item, "pubDate"))
             content = self._safe_fetch_article_text(url, source.headers, fallback=summary)
             articles.append(
@@ -78,8 +108,8 @@ class ArticleFetcher:
                 if link.attrib.get("rel", "alternate") == "alternate":
                     url = link.attrib.get("href", "")
                     break
-            summary = _html_to_text(
-                _find_text(entry, f"{ATOM_NS}summary") or _find_text(entry, f"{ATOM_NS}content")
+            summary = _clean_text(
+                _html_to_text(_find_text(entry, f"{ATOM_NS}summary") or _find_text(entry, f"{ATOM_NS}content"))
             )
             published = _normalize_published(
                 _find_text(entry, f"{ATOM_NS}published") or _find_text(entry, f"{ATOM_NS}updated")
@@ -105,7 +135,7 @@ class ArticleFetcher:
         articles: list[Article] = []
         for item in payload.get("items", [])[:limit]:
             url = item.get("url") or item.get("external_url") or ""
-            summary = _html_to_text(item.get("summary", ""))
+            summary = _clean_text(_html_to_text(item.get("summary", "")))
             content = self._safe_fetch_article_text(url, source.headers, fallback=summary)
             articles.append(
                 Article(
@@ -128,26 +158,27 @@ class ArticleFetcher:
             return ""
         html = self._download_text(url, headers)
         soup = BeautifulSoup(html, "html.parser")
-        for tag in soup(["script", "style", "noscript", "svg"]):
+        for tag in soup(["script", "style", "noscript", "svg", "header", "footer", "nav", "aside", "form"]):
             tag.decompose()
 
         texts = []
         for selector in CONTENT_CANDIDATES:
             for node in soup.select(selector):
-                text = node.get_text("\n", strip=True)
-                if len(text) > 160:
+                text = _clean_text(node.get_text("\n", strip=True))
+                if len(text) > 200:
                     texts.append(text)
         if texts:
             texts.sort(key=len, reverse=True)
             return texts[0][:8000]
-        return soup.get_text("\n", strip=True)[:8000]
+        return _clean_text(soup.get_text("\n", strip=True))[:8000]
 
     def _safe_fetch_article_text(self, url: str, headers: dict[str, str], fallback: str) -> str:
         if not _should_fetch_page(url):
             return fallback
         try:
             return self._fetch_article_text(url, headers) or fallback
-        except (HTTPError, URLError, TimeoutError, ValueError):
+        except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+            self.logger.warning("Article fetch fallback: url=%s error=%s", url, exc)
             return fallback
 
     def _download_text(self, url: str, headers: dict[str, str] | None = None) -> str:
@@ -189,3 +220,19 @@ def _should_fetch_page(url: str) -> bool:
         return False
     hostname = urlparse(url).netloc.lower()
     return "arxiv.org" not in hostname
+
+
+def _clean_text(text: str) -> str:
+    lines = [line.strip() for line in (text or "").splitlines()]
+    kept_lines: list[str] = []
+    for line in lines:
+        if len(line) < 2:
+            continue
+        if any(pattern.match(line) for pattern in NOISE_PATTERNS):
+            continue
+        if line.lower().startswith(("menu ", "search ", "language ", "languages ")):
+            continue
+        kept_lines.append(line)
+    cleaned = " ".join(kept_lines)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned

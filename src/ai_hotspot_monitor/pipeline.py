@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections import defaultdict
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 
 from ai_hotspot_monitor.fetcher import ArticleFetcher
 from ai_hotspot_monitor.models import (
@@ -19,8 +21,12 @@ from ai_hotspot_monitor.scoring import (
     build_resume_profile,
     fingerprint_title,
     generate_summary,
+    normalize_text,
     score_article,
 )
+
+
+LOGGER = logging.getLogger("ai_hotspot_monitor")
 
 
 class MonitorPipeline:
@@ -28,9 +34,11 @@ class MonitorPipeline:
         self,
         fetcher: ArticleFetcher | None = None,
         ai_evaluator: "AiHotspotEvaluator | None" = None,
+        logger: logging.Logger | None = None,
     ) -> None:
-        self.fetcher = fetcher or ArticleFetcher()
+        self.fetcher = fetcher or ArticleFetcher(logger=logger or LOGGER)
         self.ai_evaluator = ai_evaluator
+        self.logger = logger or LOGGER
 
     def run(
         self,
@@ -45,9 +53,20 @@ class MonitorPipeline:
         ai_top_k: int,
         ai_candidate_pool: int,
     ) -> MonitorResult:
+        self.logger.info(
+            "Pipeline run started: sources=%s per_source_limit=%s ai_enabled=%s",
+            len(sources),
+            per_source_limit,
+            self.ai_evaluator is not None,
+        )
         profile = build_resume_profile(resume_text)
         fetched_articles = self._fetch_all(sources, per_source_limit)
         deduped_articles, duplicate_counts, topic_cluster_sizes = self._dedupe_articles(fetched_articles)
+        self.logger.info(
+            "Collection complete: fetched=%s deduped=%s",
+            len(fetched_articles),
+            len(deduped_articles),
+        )
 
         ranked: list[RankedArticle] = []
         for article in deduped_articles:
@@ -89,36 +108,15 @@ class MonitorPipeline:
             reverse=True,
         )
 
+        refinement_mode = "disabled"
         if self.ai_evaluator:
-            self.ai_evaluator.apply_embedding_rerank(profile, ranked[: max(ai_candidate_pool, ai_top_k)])
-            rerank_candidates = sorted(
-                ranked[: max(ai_candidate_pool, ai_top_k)],
-                key=lambda item: (
-                    item.local_score.keep,
-                    item.embedding_score,
-                    item.final_discovery_score,
-                    item.final_score,
-                ),
-                reverse=True,
+            refinement_mode = self.ai_evaluator.refine(
+                profile=profile,
+                ranked=ranked,
+                ai_top_k=ai_top_k,
+                ai_candidate_pool=ai_candidate_pool,
             )
-            for item in rerank_candidates[:ai_top_k]:
-                assessment = self.ai_evaluator.evaluate(profile, item)
-                item.ai_assessment = assessment
-                item.final_relevance_score = assessment.relevance_score
-                item.final_impact_score = assessment.impact_score
-                item.final_quality_score = assessment.quality_score
-                item.final_discovery_score = assessment.discovery_score
-                item.embedding_score = assessment.embedding_score
-                item.final_score = round(
-                    0.30 * assessment.relevance_score
-                    + 0.25 * assessment.impact_score
-                    + 0.20 * assessment.quality_score
-                    + 0.15 * assessment.discovery_score
-                    + 0.10 * assessment.embedding_score,
-                    2,
-                )
-                if assessment.summary:
-                    item.generated_summary = assessment.summary
+            self.logger.info("AI refinement completed with mode=%s", refinement_mode)
 
         ranked.sort(
             key=lambda item: (
@@ -143,6 +141,7 @@ class MonitorPipeline:
                 deduped_count=len(deduped_articles),
                 kept_count=kept,
                 discarded_count=max(0, len(ranked) - kept),
+                refinement_mode=refinement_mode,
             ),
             generated_at=datetime.now(timezone.utc),
         )
@@ -151,18 +150,21 @@ class MonitorPipeline:
         articles: list[Article] = []
         for source in sources:
             try:
-                articles.extend(self.fetcher.fetch(source, per_source_limit))
-            except Exception:
+                source_articles = self.fetcher.fetch(source, per_source_limit)
+                self.logger.info("Fetched source=%s count=%s", source.name, len(source_articles))
+                articles.extend(source_articles)
+            except Exception as exc:
+                self.logger.warning("Source fetch failed: source=%s error=%s", source.name, exc)
                 continue
         return articles
 
     def _dedupe_articles(
         self, articles: list[Article]
     ) -> tuple[list[Article], dict[str, int], dict[str, int]]:
-        by_url: dict[str, Article] = {}
-        by_title: dict[str, Article] = {}
+        deduped: list[Article] = []
         duplicate_counts: dict[str, int] = defaultdict(int)
         topic_cluster_sizes: dict[str, int] = defaultdict(int)
+        seen_urls: dict[str, Article] = {}
 
         for article in articles:
             canonical_key = article.url.strip() or article.title.strip()
@@ -170,35 +172,56 @@ class MonitorPipeline:
             duplicate_counts[canonical_key] += 1
             topic_cluster_sizes[topic_key] += 1
 
-            if article.url:
-                if article.url in by_url:
-                    by_url[article.url] = _prefer_article(by_url[article.url], article)
-                else:
-                    by_url[article.url] = article
-            else:
-                if topic_key in by_title:
-                    by_title[topic_key] = _prefer_article(by_title[topic_key], article)
-                else:
-                    by_title[topic_key] = article
+            if article.url and article.url in seen_urls:
+                preferred = _prefer_article(seen_urls[article.url], article)
+                seen_urls[article.url] = preferred
+                if preferred is article and preferred not in deduped:
+                    deduped.append(preferred)
+                continue
 
-        deduped = list(by_url.values())
-        seen_topic_keys = {fingerprint_title(item.title) or item.title.strip().lower() for item in deduped}
-        for key, article in by_title.items():
-            if key not in seen_topic_keys:
-                deduped.append(article)
-                seen_topic_keys.add(key)
+            if self._is_near_duplicate(article, deduped):
+                duplicate_counts[canonical_key] += 1
+                continue
+
+            deduped.append(article)
+            if article.url:
+                seen_urls[article.url] = article
+
         return deduped, duplicate_counts, topic_cluster_sizes
+
+    def _is_near_duplicate(self, candidate: Article, existing_articles: list[Article]) -> bool:
+        candidate_title = _normalized_title(candidate.title)
+        candidate_body = _normalized_body(candidate.content or candidate.summary)
+        for existing in existing_articles:
+            existing_title = _normalized_title(existing.title)
+            if candidate_title and candidate_title == existing_title:
+                return True
+            if candidate_title and existing_title:
+                title_ratio = SequenceMatcher(None, candidate_title, existing_title).ratio()
+                if title_ratio >= 0.94:
+                    return True
+
+            existing_body = _normalized_body(existing.content or existing.summary)
+            if candidate_body and existing_body:
+                body_ratio = SequenceMatcher(None, candidate_body[:1200], existing_body[:1200]).ratio()
+                if body_ratio >= 0.9 and candidate_title == existing_title:
+                    return True
+        return False
 
 
 class AiHotspotEvaluator:
     def __init__(
         self,
-        api_key: str | None,
-        api_key_env: str,
-        model: str,
+        chat_api_key: str | None,
+        chat_api_key_env: str,
+        chat_model: str,
         embedding_model: str,
         generation_api: str = "responses",
-        base_url: str | None = None,
+        chat_base_url: str | None = None,
+        embedding_api_key: str | None = None,
+        embedding_api_key_env: str = "OPENAI_EMBEDDING_API_KEY",
+        embedding_base_url: str | None = None,
+        logger: logging.Logger | None = None,
     ) -> None:
         try:
             from openai import OpenAI
@@ -206,25 +229,108 @@ class AiHotspotEvaluator:
             raise ModuleNotFoundError(
                 "OpenAI package is not installed. Install dependencies or disable --ai-evaluate."
             ) from exc
-        api_key = api_key or os.getenv(api_key_env)
-        if not api_key:
+
+        self.logger = logger or LOGGER
+        chat_api_key = chat_api_key or os.getenv(chat_api_key_env)
+        if not chat_api_key:
             raise ValueError(
-                f"Either --openai-api-key or environment variable {api_key_env} is required for AI hotspot evaluation."
+                f"Either chat API key parameter or environment variable {chat_api_key_env} is required."
             )
-        client_kwargs = {"api_key": api_key}
-        if base_url:
-            client_kwargs["base_url"] = base_url
-        self.client = OpenAI(**client_kwargs)
-        self.model = model
+
+        chat_kwargs = {"api_key": chat_api_key}
+        if chat_base_url:
+            chat_kwargs["base_url"] = chat_base_url
+        self.chat_client = OpenAI(**chat_kwargs)
+
+        self.chat_model = chat_model
         self.embedding_model = embedding_model
         self.generation_api = generation_api
+        self.embedding_client = None
+        self.embedding_available = False
+
+        embedding_api_key = embedding_api_key or os.getenv(embedding_api_key_env) or chat_api_key
+        resolved_embedding_base_url = embedding_base_url or chat_base_url
+        if embedding_model:
+            embedding_kwargs = {"api_key": embedding_api_key}
+            if resolved_embedding_base_url:
+                embedding_kwargs["base_url"] = resolved_embedding_base_url
+            self.embedding_client = OpenAI(**embedding_kwargs)
+            self.embedding_available = True
+
+        self.logger.info(
+            "AI evaluator initialized: generation_api=%s chat_model=%s embedding_model=%s chat_base_url=%s embedding_base_url=%s embedding_enabled=%s",
+            self.generation_api,
+            self.chat_model,
+            self.embedding_model,
+            chat_base_url or "<default>",
+            resolved_embedding_base_url or "<default>",
+            self.embedding_available,
+        )
+
+    def refine(
+        self,
+        *,
+        profile: ResumeProfile,
+        ranked: list[RankedArticle],
+        ai_top_k: int,
+        ai_candidate_pool: int,
+    ) -> str:
+        if not ranked:
+            return "disabled"
+
+        refinement_mode = "chat-only"
+        candidate_pool = ranked[: max(ai_candidate_pool, ai_top_k)]
+
+        if self.embedding_available and self.embedding_client is not None:
+            self.logger.info("Starting embedding rerank for %s candidates", len(candidate_pool))
+            try:
+                self.apply_embedding_rerank(profile, candidate_pool)
+                refinement_mode = "full"
+                self.logger.info("Embedding rerank completed successfully")
+            except Exception as exc:
+                refinement_mode = "chat-only"
+                self.logger.warning("Embedding rerank failed, falling back to chat-only mode: %s", exc)
+        else:
+            self.logger.info("Embedding rerank skipped because embedding client is unavailable")
+
+        rerank_candidates = sorted(
+            candidate_pool,
+            key=lambda item: (
+                item.local_score.keep,
+                item.embedding_score,
+                item.final_discovery_score,
+                item.final_score,
+            ),
+            reverse=True,
+        )
+        self.logger.info("Starting chat evaluation for %s candidates", min(ai_top_k, len(rerank_candidates)))
+        for item in rerank_candidates[:ai_top_k]:
+            assessment = self.evaluate(profile, item)
+            item.ai_assessment = assessment
+            item.final_relevance_score = assessment.relevance_score
+            item.final_impact_score = assessment.impact_score
+            item.final_quality_score = assessment.quality_score
+            item.final_discovery_score = assessment.discovery_score
+            item.embedding_score = assessment.embedding_score
+            item.final_score = round(
+                0.30 * assessment.relevance_score
+                + 0.25 * assessment.impact_score
+                + 0.20 * assessment.quality_score
+                + 0.15 * assessment.discovery_score
+                + 0.10 * assessment.embedding_score,
+                2,
+            )
+            if assessment.summary:
+                item.generated_summary = assessment.summary
+        self.logger.info("Chat evaluation finished")
+        return refinement_mode
 
     def apply_embedding_rerank(self, profile: ResumeProfile, ranked_articles: list[RankedArticle]) -> None:
-        if not ranked_articles:
-            return
+        if not ranked_articles or self.embedding_client is None:
+            raise RuntimeError("Embedding client is not configured")
         texts = [profile.raw_text[:7000]]
         texts.extend(_embedding_text(item.article) for item in ranked_articles)
-        response = self.client.embeddings.create(model=self.embedding_model, input=texts)
+        response = self.embedding_client.embeddings.create(model=self.embedding_model, input=texts)
         vectors = [item.embedding for item in response.data]
         resume_vector = vectors[0]
         article_vectors = vectors[1:]
@@ -329,8 +435,8 @@ class AiHotspotEvaluator:
         )
 
     def _evaluate_via_responses(self, instructions: str, prompt: str, schema: dict) -> dict:
-        response = self.client.responses.create(
-            model=self.model,
+        response = self.chat_client.responses.create(
+            model=self.chat_model,
             store=False,
             instructions=instructions,
             input=prompt,
@@ -346,8 +452,8 @@ class AiHotspotEvaluator:
         return json.loads(response.output_text)
 
     def _evaluate_via_chat_completions(self, instructions: str, prompt: str, schema: dict) -> dict:
-        response = self.client.chat.completions.create(
-            model=self.model,
+        response = self.chat_client.chat.completions.create(
+            model=self.chat_model,
             messages=[
                 {"role": "system", "content": instructions},
                 {"role": "user", "content": prompt},
@@ -401,3 +507,12 @@ def _action_bucket(item: RankedArticle) -> str:
     if item.final_impact_score >= 75 or item.local_score.industry_heavyweight:
         return "industry-watch"
     return "watchlist"
+
+
+def _normalized_title(title: str) -> str:
+    return normalize_text(title).lower()
+
+
+def _normalized_body(text: str) -> str:
+    normalized = normalize_text(text).lower()
+    return normalized[:2000]

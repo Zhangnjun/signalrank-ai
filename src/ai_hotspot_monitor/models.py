@@ -116,6 +116,7 @@ class PipelineStats:
     deduped_count: int
     kept_count: int
     discarded_count: int
+    refinement_mode: str
 
 
 @dataclass(slots=True)

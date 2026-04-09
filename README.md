@@ -132,11 +132,16 @@ ai-hotspot-monitor \
   --resume ./path/to/resume.md \
   --sources ./sources.json \
   --ai-evaluate \
+  --openai-api-key your_chat_key \
   --openai-base-url http://your-company-gateway/v1 \
   --generation-api chat-completions \
-  --embedding-model text-embedding-3-small \
-  --ai-model gpt-5-mini
+  --ai-model qwen3.5 \
+  --embedding-model your-embedding-model \
+  --embedding-api-key your_embedding_key \
+  --embedding-base-url http://your-embedding-gateway/v1
 ```
+
+If the embedding endpoint is unavailable or returns an error, the pipeline automatically falls back to `chat-only` refinement instead of exiting.
 
 ## Source Configurations
 
@@ -166,6 +171,7 @@ Each record includes:
 - local scores
 - final scores
 - optional embedding score
+- refinement mode: `disabled`, `chat-only`, or `full`
 - keep decision and keep reason
 - retention class such as `resume-fit`, `industry-heavyweight`, `demo-potential`, or `interview-material`
 - content kind such as `infra-platform`, `agent-tooling`, `research-paper`, or `consumer-newsroom`
@@ -221,8 +227,10 @@ This is intentionally broader than a strict relevance-only filter.
 When `--ai-evaluate` is enabled:
 
 1. local scoring performs wide recall
-2. embeddings rerank the candidate pool semantically
+2. embeddings rerank the candidate pool semantically when available
 3. the top subset is sent to the LLM for structured final judgment
+
+If embeddings are unavailable, the pipeline degrades to `chat-only` mode and still completes.
 
 This makes the system much more practical than either:
 
@@ -251,10 +259,16 @@ This makes the system much more practical than either:
   Number of locally recalled items to send through embeddings.
 - `--ai-top-k`
   Number of items to send to the LLM after embedding rerank.
+- `--embedding-api-key`
+  Direct API key for the embedding endpoint.
+- `--embedding-api-key-env`
+  Environment variable for the embedding API key.
+- `--embedding-base-url`
+  Optional OpenAI-compatible base URL for the embedding endpoint.
 - `--generation-api`
   Choose `responses` or `chat-completions` for the AI rerank stage. Use `chat-completions` for gateways that do not support `/v1/responses`.
 - `--openai-api-key`
-  Direct API key input. Overrides the environment-variable lookup.
+  Direct API key input for the chat/generation endpoint. Overrides the environment-variable lookup.
 - `--openai-base-url`
   Optional OpenAI-compatible base URL. Useful for company-hosted gateways, proxies, or compatible deployments.
 
