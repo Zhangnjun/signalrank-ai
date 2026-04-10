@@ -43,9 +43,10 @@ SignalRank AI takes a different approach:
   - `quality_score`
   - `discovery_score`
   - `final_score`
-- Optional OpenAI-powered rerank:
+- Optional OpenAI-compatible rerank:
   - embedding-based semantic rerank
   - LLM-based final structured judgment
+  - raw HTTP request path for enterprise gateways
 - Markdown and JSON outputs for both human review and downstream automation
 
 ## Repository Layout

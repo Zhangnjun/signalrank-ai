@@ -41,9 +41,10 @@ SignalRank AI 的思路不同：
   - `quality_score`
   - `discovery_score`
   - `final_score`
-- 可选 OpenAI 增强：
+- 可选 OpenAI-compatible 增强：
   - embedding 语义重排
   - LLM 结构化最终判定
+  - 面向企业网关的原始 HTTP 调用路径
 - 输出 Markdown 和 JSON，方便人工查看和后续自动化处理
 
 ## 目录结构

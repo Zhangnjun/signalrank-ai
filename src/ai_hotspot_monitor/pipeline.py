@@ -6,6 +6,9 @@ import os
 from collections import defaultdict
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from typing import Any
+
+import requests
 
 from ai_hotspot_monitor.fetcher import ArticleFetcher
 from ai_hotspot_monitor.models import (
@@ -223,38 +226,24 @@ class AiHotspotEvaluator:
         embedding_base_url: str | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
-        try:
-            from openai import OpenAI
-        except ModuleNotFoundError as exc:
-            raise ModuleNotFoundError(
-                "OpenAI package is not installed. Install dependencies or disable --ai-evaluate."
-            ) from exc
-
         self.logger = logger or LOGGER
         chat_api_key = chat_api_key or os.getenv(chat_api_key_env)
         if not chat_api_key:
             raise ValueError(
                 f"Either chat API key parameter or environment variable {chat_api_key_env} is required."
             )
-
-        chat_kwargs = {"api_key": chat_api_key}
-        if chat_base_url:
-            chat_kwargs["base_url"] = chat_base_url
-        self.chat_client = OpenAI(**chat_kwargs)
-
+        self.chat_api_key = chat_api_key
         self.chat_model = chat_model
         self.embedding_model = embedding_model
         self.generation_api = generation_api
-        self.embedding_client = None
+        self.chat_base_url = (chat_base_url or "").rstrip("/")
+        self.embedding_api_key = embedding_api_key or os.getenv(embedding_api_key_env) or chat_api_key
+        self.embedding_base_url = (embedding_base_url or chat_base_url or "").rstrip("/")
+        self.chat_timeout = 120
+        self.embedding_timeout = 60
         self.embedding_available = False
 
-        embedding_api_key = embedding_api_key or os.getenv(embedding_api_key_env) or chat_api_key
-        resolved_embedding_base_url = embedding_base_url or chat_base_url
-        if embedding_model:
-            embedding_kwargs = {"api_key": embedding_api_key}
-            if resolved_embedding_base_url:
-                embedding_kwargs["base_url"] = resolved_embedding_base_url
-            self.embedding_client = OpenAI(**embedding_kwargs)
+        if embedding_model and self.embedding_base_url and self.embedding_api_key:
             self.embedding_available = True
 
         self.logger.info(
@@ -262,8 +251,8 @@ class AiHotspotEvaluator:
             self.generation_api,
             self.chat_model,
             self.embedding_model,
-            chat_base_url or "<default>",
-            resolved_embedding_base_url or "<default>",
+            self.chat_base_url or "<default>",
+            self.embedding_base_url or "<default>",
             self.embedding_available,
         )
 
@@ -326,12 +315,19 @@ class AiHotspotEvaluator:
         return refinement_mode
 
     def apply_embedding_rerank(self, profile: ResumeProfile, ranked_articles: list[RankedArticle]) -> None:
-        if not ranked_articles or self.embedding_client is None:
+        if not ranked_articles or not self.embedding_available:
             raise RuntimeError("Embedding client is not configured")
         texts = [profile.raw_text[:7000]]
         texts.extend(_embedding_text(item.article) for item in ranked_articles)
-        response = self.embedding_client.embeddings.create(model=self.embedding_model, input=texts)
-        vectors = [item.embedding for item in response.data]
+        payload = {"model": self.embedding_model, "input": texts}
+        response_payload = self._post_json(
+            url=f"{self.embedding_base_url}/embeddings",
+            api_key=self.embedding_api_key,
+            payload=payload,
+            timeout=self.embedding_timeout,
+            request_name="embedding",
+        )
+        vectors = [item["embedding"] for item in response_payload["data"]]
         resume_vector = vectors[0]
         article_vectors = vectors[1:]
 
@@ -435,12 +431,12 @@ class AiHotspotEvaluator:
         )
 
     def _evaluate_via_responses(self, instructions: str, prompt: str, schema: dict) -> dict:
-        response = self.chat_client.responses.create(
-            model=self.chat_model,
-            store=False,
-            instructions=instructions,
-            input=prompt,
-            text={
+        payload = {
+            "model": self.chat_model,
+            "store": False,
+            "instructions": instructions,
+            "input": prompt,
+            "text": {
                 "format": {
                     "type": "json_schema",
                     "name": "hotspot_assessment",
@@ -448,17 +444,32 @@ class AiHotspotEvaluator:
                     "schema": schema,
                 }
             },
+        }
+        response_payload = self._post_json(
+            url=f"{self.chat_base_url}/responses",
+            api_key=self.chat_api_key,
+            payload=payload,
+            timeout=self.chat_timeout,
+            request_name="responses",
         )
-        return json.loads(response.output_text)
+        output_text = response_payload.get("output_text")
+        if output_text:
+            return json.loads(output_text)
+        for item in response_payload.get("output", []):
+            for content in item.get("content", []):
+                text = content.get("text")
+                if text:
+                    return json.loads(text)
+        raise RuntimeError("Responses API returned no JSON text payload")
 
     def _evaluate_via_chat_completions(self, instructions: str, prompt: str, schema: dict) -> dict:
-        response = self.chat_client.chat.completions.create(
-            model=self.chat_model,
-            messages=[
+        payload = {
+            "model": self.chat_model,
+            "messages": [
                 {"role": "system", "content": instructions},
                 {"role": "user", "content": prompt},
             ],
-            response_format={
+            "response_format": {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "hotspot_assessment",
@@ -466,9 +477,52 @@ class AiHotspotEvaluator:
                     "schema": schema,
                 },
             },
+        }
+        response_payload = self._post_json(
+            url=f"{self.chat_base_url}/chat/completions",
+            api_key=self.chat_api_key,
+            payload=payload,
+            timeout=self.chat_timeout,
+            request_name="chat-completions",
         )
-        content = response.choices[0].message.content or "{}"
+        content = response_payload["choices"][0]["message"].get("content") or "{}"
+        if isinstance(content, list):
+            text_chunks = [item.get("text", "") for item in content if isinstance(item, dict)]
+            content = "".join(text_chunks) or "{}"
         return json.loads(content)
+
+    def _post_json(
+        self,
+        *,
+        url: str,
+        api_key: str | None,
+        payload: dict[str, Any],
+        timeout: int,
+        request_name: str,
+    ) -> dict:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key or ''}",
+        }
+        self.logger.info("HTTP request start: name=%s url=%s timeout=%ss", request_name, url, timeout)
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        except Exception as exc:
+            self.logger.error("HTTP request failed before response: name=%s url=%s timeout=%ss error=%s", request_name, url, timeout, exc)
+            raise
+
+        content_type = response.headers.get("content-type", "")
+        preview = response.text[:300].replace("\n", " ")
+        self.logger.info(
+            "HTTP response: name=%s url=%s status=%s content_type=%s body_preview=%s",
+            request_name,
+            url,
+            response.status_code,
+            content_type,
+            preview,
+        )
+        response.raise_for_status()
+        return response.json()
 
 
 def _prefer_article(left: Article, right: Article) -> Article:
