@@ -113,13 +113,20 @@ class MonitorPipeline:
 
         refinement_mode = "disabled"
         if self.ai_evaluator:
-            refinement_mode = self.ai_evaluator.refine(
-                profile=profile,
-                ranked=ranked,
-                ai_top_k=ai_top_k,
-                ai_candidate_pool=ai_candidate_pool,
-            )
-            self.logger.info("AI refinement completed with mode=%s", refinement_mode)
+            try:
+                refinement_mode = self.ai_evaluator.refine(
+                    profile=profile,
+                    ranked=ranked,
+                    ai_top_k=ai_top_k,
+                    ai_candidate_pool=ai_candidate_pool,
+                )
+                self.logger.info("AI refinement completed with mode=%s", refinement_mode)
+            except Exception as exc:
+                refinement_mode = "disabled"
+                self.logger.exception(
+                    "AI refinement failed; falling back to local ranking only: error=%s",
+                    exc,
+                )
 
         ranked.sort(
             key=lambda item: (
@@ -270,7 +277,7 @@ class AiHotspotEvaluator:
         refinement_mode = "chat-only"
         candidate_pool = ranked[: max(ai_candidate_pool, ai_top_k)]
 
-        if self.embedding_available and self.embedding_client is not None:
+        if self.embedding_available:
             self.logger.info("Starting embedding rerank for %s candidates", len(candidate_pool))
             try:
                 self.apply_embedding_rerank(profile, candidate_pool)
@@ -294,7 +301,17 @@ class AiHotspotEvaluator:
         )
         self.logger.info("Starting chat evaluation for %s candidates", min(ai_top_k, len(rerank_candidates)))
         for item in rerank_candidates[:ai_top_k]:
-            assessment = self.evaluate(profile, item)
+            try:
+                assessment = self.evaluate(profile, item)
+            except Exception as exc:
+                self.logger.warning(
+                    "Chat evaluation failed for article=%s url=%s error=%s; keeping local ranking for this item",
+                    item.article.title,
+                    item.article.url,
+                    exc,
+                )
+                continue
+
             item.ai_assessment = assessment
             item.final_relevance_score = assessment.relevance_score
             item.final_impact_score = assessment.impact_score
@@ -316,7 +333,7 @@ class AiHotspotEvaluator:
 
     def apply_embedding_rerank(self, profile: ResumeProfile, ranked_articles: list[RankedArticle]) -> None:
         if not ranked_articles or not self.embedding_available:
-            raise RuntimeError("Embedding client is not configured")
+            raise RuntimeError("Embedding rerank is not configured")
         texts = [profile.raw_text[:7000]]
         texts.extend(_embedding_text(item.article) for item in ranked_articles)
         payload = {"model": self.embedding_model, "input": texts}
