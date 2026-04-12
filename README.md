@@ -81,6 +81,7 @@ signalrank-ai/
 macOS / Linux:
 
 ```bash
+cd /Users/sheldonzhao/Desktop/github/signalrank-ai
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -90,6 +91,7 @@ cp sources.curated.json sources.json
 Windows PowerShell:
 
 ```powershell
+Set-Location "D:/github/signalrank-ai"
 py -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e .
@@ -107,12 +109,14 @@ ai-hotspot-monitor \
 Run the interactive web UI:
 
 ```bash
+cd /Users/sheldonzhao/Desktop/github/signalrank-ai
 signalrank-web
 ```
 
 By default it starts at [http://127.0.0.1:8000](http://127.0.0.1:8000). You can override the bind address with:
 
 ```bash
+cd /Users/sheldonzhao/Desktop/github/signalrank-ai
 SIGNALRANK_HOST=127.0.0.1 SIGNALRANK_PORT=8765 signalrank-web
 ```
 

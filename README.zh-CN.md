@@ -80,6 +80,7 @@ signalrank-ai/
 macOS / Linux：
 
 ```bash
+cd /Users/sheldonzhao/Desktop/github/signalrank-ai
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -89,6 +90,7 @@ cp sources.curated.json sources.json
 Windows PowerShell：
 
 ```powershell
+Set-Location "D:/github/signalrank-ai"
 py -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e .
@@ -106,12 +108,14 @@ ai-hotspot-monitor \
 启动可交互网页：
 
 ```bash
+cd /Users/sheldonzhao/Desktop/github/signalrank-ai
 signalrank-web
 ```
 
 默认地址是 [http://127.0.0.1:8000](http://127.0.0.1:8000)。如果端口冲突，可以这样改：
 
 ```bash
+cd /Users/sheldonzhao/Desktop/github/signalrank-ai
 SIGNALRANK_HOST=127.0.0.1 SIGNALRANK_PORT=8765 signalrank-web
 ```
 
