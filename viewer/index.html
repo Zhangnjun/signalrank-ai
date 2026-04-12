@@ -78,66 +78,66 @@
               </label>
             </div>
           </section>
-        </form>
 
-        <section id="ai-settings" class="ai-settings">
-          <div class="panel-subheader">
-            <h3 id="ai-settings-title"></h3>
-            <p id="ai-settings-help" class="panel-meta"></p>
+          <section id="ai-settings" class="ai-settings">
+            <div class="panel-subheader">
+              <h3 id="ai-settings-title"></h3>
+              <p id="ai-settings-help" class="panel-meta"></p>
+            </div>
+            <div class="run-form">
+              <label>
+                <span id="ai-expand-resume-label">AI Expand Resume</span>
+                <select id="ai-expand-resume" name="ai_expand_resume">
+                  <option value="false">false</option>
+                  <option value="true">true</option>
+                </select>
+              </label>
+              <label>
+                <span id="generation-api-label">Generation API</span>
+                <select id="generation-api" name="generation_api">
+                  <option value="responses">responses</option>
+                  <option value="chat-completions">chat-completions</option>
+                </select>
+              </label>
+              <label>
+                <span id="ai-model-label">AI Model</span>
+                <input id="ai-model" name="ai_model" type="text" value="gpt-5-mini" />
+              </label>
+              <label>
+                <span id="embedding-model-label">Embedding Model</span>
+                <input id="embedding-model" name="embedding_model" type="text" value="text-embedding-3-small" />
+              </label>
+              <label>
+                <span id="chat-base-url-label">Chat Base URL</span>
+                <input id="chat-base-url" name="openai_base_url" type="text" placeholder="http://gateway/v1" />
+              </label>
+              <label>
+                <span id="embedding-base-url-label">Embedding Base URL</span>
+                <input id="embedding-base-url" name="embedding_base_url" type="text" placeholder="http://gateway/v1" />
+              </label>
+              <label>
+                <span id="chat-api-key-label">Chat API Key</span>
+                <input id="chat-api-key" name="openai_api_key" type="password" />
+              </label>
+              <label>
+                <span id="embedding-api-key-label">Embedding API Key</span>
+                <input id="embedding-api-key" name="embedding_api_key" type="password" />
+              </label>
+              <label>
+                <span id="chat-timeout-label">Chat Timeout</span>
+                <input id="chat-timeout" name="chat_timeout" type="number" value="300" min="1" />
+              </label>
+              <label>
+                <span id="embedding-timeout-label">Embedding Timeout</span>
+                <input id="embedding-timeout" name="embedding_timeout" type="number" value="60" min="1" />
+              </label>
+            </div>
+          </section>
+          <div class="run-actions">
+            <button id="run-button" type="button">Run</button>
+            <span id="run-status" class="panel-meta"></span>
           </div>
-          <div class="run-form">
-            <label>
-            <span id="ai-expand-resume-label">AI Expand Resume</span>
-            <select id="ai-expand-resume" name="ai_expand_resume">
-              <option value="false">false</option>
-              <option value="true">true</option>
-            </select>
-            </label>
-            <label>
-            <span id="generation-api-label">Generation API</span>
-            <select id="generation-api" name="generation_api">
-              <option value="responses">responses</option>
-              <option value="chat-completions">chat-completions</option>
-            </select>
-            </label>
-            <label>
-            <span id="ai-model-label">AI Model</span>
-            <input id="ai-model" name="ai_model" type="text" value="gpt-5-mini" />
-            </label>
-            <label>
-            <span id="embedding-model-label">Embedding Model</span>
-            <input id="embedding-model" name="embedding_model" type="text" value="text-embedding-3-small" />
-            </label>
-            <label>
-            <span id="chat-base-url-label">Chat Base URL</span>
-            <input id="chat-base-url" name="openai_base_url" type="text" placeholder="http://gateway/v1" />
-            </label>
-            <label>
-            <span id="embedding-base-url-label">Embedding Base URL</span>
-            <input id="embedding-base-url" name="embedding_base_url" type="text" placeholder="http://gateway/v1" />
-            </label>
-            <label>
-            <span id="chat-api-key-label">Chat API Key</span>
-            <input id="chat-api-key" name="openai_api_key" type="password" />
-            </label>
-            <label>
-            <span id="embedding-api-key-label">Embedding API Key</span>
-            <input id="embedding-api-key" name="embedding_api_key" type="password" />
-            </label>
-            <label>
-            <span id="chat-timeout-label">Chat Timeout</span>
-            <input id="chat-timeout" name="chat_timeout" type="number" value="300" min="1" />
-            </label>
-            <label>
-            <span id="embedding-timeout-label">Embedding Timeout</span>
-            <input id="embedding-timeout" name="embedding_timeout" type="number" value="60" min="1" />
-            </label>
-          </div>
-        </section>
-        <div class="run-actions">
-          <button id="run-button" type="button">Run</button>
-          <span id="run-status" class="panel-meta"></span>
-        </div>
+        </form>
       </section>
 
       <section class="panel" aria-labelledby="overview-title">
