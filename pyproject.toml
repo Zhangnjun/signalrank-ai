@@ -5,14 +5,18 @@ description = "SignalRank AI: monitor AI industry hotspots and rank them by CV r
 requires-python = ">=3.11"
 dependencies = [
   "beautifulsoup4>=4.12.3",
+  "fastapi>=0.116.0",
   "pypdf>=5.4.0",
+  "python-multipart>=0.0.20",
   "python-docx>=1.1.2",
   "requests>=2.32.0",
   "scikit-learn>=1.6.1",
+  "uvicorn>=0.35.0",
 ]
 
 [project.scripts]
 ai-hotspot-monitor = "ai_hotspot_monitor.cli:main"
+signalrank-web = "ai_hotspot_monitor.api:run_dev_server"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

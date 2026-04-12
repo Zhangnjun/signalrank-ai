@@ -44,7 +44,9 @@ SignalRank AI 的思路不同：
 - 可选 OpenAI-compatible 增强：
   - embedding 语义重排
   - LLM 结构化最终判定
-  - 面向企业网关的原始 HTTP 调用路径
+  - 面向企业网关的原始 HTTP 直连
+  - `full`、`chat-only`、`local-only`、`failed-fallback` 多级降级
+- 纯静态离线结果查看页
 - 输出 Markdown 和 JSON，方便人工查看和后续自动化处理
 
 ## 目录结构
@@ -58,7 +60,12 @@ signalrank-ai/
 ├── sources.example.json
 ├── sources.curated.json
 ├── sources.premium.example.json
+├── viewer
+│   ├── app.js
+│   ├── index.html
+│   └── styles.css
 └── src/ai_hotspot_monitor
+    ├── api.py
     ├── cli.py
     ├── config.py
     ├── fetcher.py
@@ -94,6 +101,18 @@ Copy-Item sources.curated.json sources.json
 ai-hotspot-monitor \
   --resume ./path/to/resume.md \
   --sources ./sources.json
+```
+
+启动可交互网页：
+
+```bash
+signalrank-web
+```
+
+默认地址是 [http://127.0.0.1:8000](http://127.0.0.1:8000)。如果端口冲突，可以这样改：
+
+```bash
+SIGNALRANK_HOST=127.0.0.1 SIGNALRANK_PORT=8765 signalrank-web
 ```
 
 开启 AI 重排：
@@ -143,6 +162,17 @@ ai-hotspot-monitor \
 
 如果 embedding endpoint 不可用或运行时报错，流水线会自动退化为 `chat-only` 模式，而不是直接退出。
 
+也可以显式配置超时：
+
+```bash
+ai-hotspot-monitor \
+  --resume ./path/to/resume.md \
+  --sources ./sources.json \
+  --ai-evaluate \
+  --chat-timeout 300 \
+  --embedding-timeout 60
+```
+
 ## 信源配置
 
 仓库中提供三套配置文件：
@@ -167,27 +197,45 @@ ai-hotspot-monitor \
 
 - 标题、来源、发布时间、URL
 - 自动摘要
+- 分层简历画像：
+  - `resume_focus_terms`
+  - `resume_stack_terms`
+  - `resume_background_terms`
+  - `excluded_resume_terms`
 - 命中的简历术语
 - 本地评分
 - 最终评分
 - 可选 embedding 分
-- refinement mode，可能是 `disabled`、`chat-only` 或 `full`
+- refinement mode，可能是 `disabled`、`chat-only`、`full`、`local-only` 或 `failed-fallback`
+- 降级和 AI 统计：
+  - `ai_error`
+  - `degrade_reason`
+  - `ai_refined_count`
+  - `ai_override_count`
+  - `degraded_count`
+  - `source_failed_count`
 - 保留决策与保留原因
+- 解释字段：
+  - `relevance_channel`
+  - `significance_type`
+  - `decision_source`
+  - `keep_reason_category`
 - 保留类别，例如 `resume-fit`、`industry-heavyweight`、`demo-potential`、`interview-material`
-- 内容类型，例如 `infra-platform`、`agent-tooling`、`research-paper`、`consumer-newsroom`
 - 是否属于行业级重磅事件
 
 ## 工作原理
 
 ### 1. 简历画像
 
-系统会先把简历归一化，并抽取：
+系统会先把简历归一化，并生成分层画像：
 
-- 标准化后的文本
-- 高权重术语
+- `resume_focus_terms`
+- `resume_stack_terms`
+- `resume_background_terms`
+- `excluded_resume_terms`
 - 一个简短的方向摘要
 
-这样就能针对不同 CV 自适应，而不是依赖固定关键词列表。
+栏目标题、教育背景通用词、弱平台词不会再和核心技术方向同权参与筛选。
 
 ### 2. 抓取与清洗
 
@@ -203,7 +251,9 @@ ai-hotspot-monitor \
 每条内容会被打多个分：
 
 - `relevance_score`
-  判断与 CV 的相关性，来源于 TF-IDF 字符特征、术语重叠和标题对齐。
+  衡量与用户画像的直接相关性，来源于 TF-IDF 相似度、分层术语重叠和标题对齐。
+- `ecosystem_significance`
+  衡量其是否属于 AI 工程生态层面的变化，如 infra、runtime、tooling、model ecosystem、hardware。
 - `impact_score`
   结合信源权重、发布时间、主题共振和内容深度。
 - `quality_score`
@@ -213,13 +263,17 @@ ai-hotspot-monitor \
 
 ### 5. 保留策略
 
-一条内容可以因为以下原因被保留：
+保留逻辑走双通道：
 
-- 与 CV 高相关
-- 是行业级重磅事件
-- 虽然不是完全命中，但影响力和质量都比较高，属于 discovery 候选
+- `direct_resume_match`
+- `ecosystem_shift`
 
-这比“只按相关性硬过滤”更适合做热点跟踪。
+同时把 heavyweight 再拆成：
+
+- `technical_ecosystem_heavyweight`
+- `corporate_or_consumer_heavyweight`
+
+这样可以保留真正影响 AI 工程生态的大事件，同时避免普通大厂 PR 仅凭来源权重混入前排。
 
 ### 6. 可选 AI 重排
 
@@ -229,7 +283,11 @@ ai-hotspot-monitor \
 2. 如果 embedding 可用，则先做语义重排
 3. 再把前一部分候选交给 LLM 做结构化最终判断
 
-如果 embedding 不可用，系统会退化到 `chat-only` 模式并继续完成任务。
+运行时直接使用原始 HTTP 请求，不依赖 OpenAI SDK。
+
+如果 embedding 不可用，系统会退化到 `chat-only`。
+如果单篇 chat 失败，该条保留本地排序。
+如果 AI refine 全局失败，系统仍会输出 JSON 和 Markdown。
 
 这比下面两种方式都更实用：
 
@@ -254,10 +312,51 @@ ai-hotspot-monitor \
   行业重磅事件阈值
 - `--ai-evaluate`
   是否开启 AI 重排
+- `--ai-expand-resume`
+  是否启用第二层 AI 简历扩展。失败时会自动回退到本地规则扩展。
 - `--ai-candidate-pool`
   embedding 阶段处理多少个候选
 - `--ai-top-k`
   LLM 最终处理多少条
+- `--chat-timeout`
+  chat/completions 或 responses 的超时秒数
+- `--embedding-timeout`
+  embeddings 的超时秒数
+
+## 离线查看页
+
+项目内置了一个纯静态查看页，用来加载本地 JSON 报告：
+
+```bash
+open ./viewer/index.html
+```
+
+或直接在浏览器中打开 [`viewer/index.html`](./viewer/index.html)。
+
+它支持：
+
+- 顶部概览区
+- 结果列表
+- keep/discard、relevance channel、significance type、AI refined、source 过滤
+- 详情面板
+- 中英切换
+
+## 可交互网页模式
+
+当 viewer 由后端服务托管时，它也可以直接触发任务。
+
+页面支持：
+
+- 上传简历文件
+- 选择内置信源预设，或上传自定义 `sources.json`
+- 配置 AI 开关、模型、base URL、API key、timeout
+- 调用 `POST /api/run`
+- 直接渲染返回结果
+
+真正的抓取、清洗、打分、embedding、AI refine 和报告落盘，仍然都由后端完成。
+浏览器不会直接去调模型接口。
+
+交互运行产生的文件会保存在 `./reports_web`。
 - `--embedding-api-key`
   embedding endpoint 使用的 API key
 - `--embedding-api-key-env`

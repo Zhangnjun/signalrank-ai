@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 from ai_hotspot_monitor.config import load_sources
 from ai_hotspot_monitor.pipeline import AiHotspotEvaluator, MonitorPipeline
@@ -38,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Logging verbosity.")
 
     parser.add_argument("--ai-evaluate", action="store_true", help="Use AI to refine the top articles.")
+    parser.add_argument("--ai-expand-resume", action="store_true", help="Use AI to expand resume focus terms before scoring. Falls back to local expansion on failure.")
     parser.add_argument("--ai-top-k", type=int, default=8, help="How many ranked items to send to the AI evaluator.")
     parser.add_argument("--ai-candidate-pool", type=int, default=20, help="How many locally recalled items to send through embedding rerank before final AI evaluation.")
     parser.add_argument("--generation-api", default="responses", choices=["responses", "chat-completions"], help="Generation API for AI rerank. Use chat-completions for gateways that do not support /v1/responses.")
@@ -51,6 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--embedding-api-key", default="", help="Direct embedding API key. Overrides the embedding environment variable if both are provided.")
     parser.add_argument("--embedding-api-key-env", default="OPENAI_EMBEDDING_API_KEY", help="Environment variable with embedding API key.")
     parser.add_argument("--embedding-base-url", default="", help="Optional OpenAI-compatible base URL for the embedding endpoint.")
+    parser.add_argument("--chat-timeout", type=int, default=300, help="Timeout in seconds for chat/generation requests.")
+    parser.add_argument("--embedding-timeout", type=int, default=60, help="Timeout in seconds for embedding requests.")
     return parser
 
 
@@ -82,6 +86,8 @@ def main() -> None:
             embedding_api_key=args.embedding_api_key or None,
             embedding_api_key_env=args.embedding_api_key_env,
             embedding_base_url=args.embedding_base_url or None,
+            chat_timeout=args.chat_timeout,
+            embedding_timeout=args.embedding_timeout,
             logger=LOGGER,
         )
     else:
@@ -98,6 +104,7 @@ def main() -> None:
         top_n=args.top_n,
         ai_top_k=args.ai_top_k,
         ai_candidate_pool=args.ai_candidate_pool,
+        ai_expand_resume=args.ai_expand_resume,
     )
     markdown_path, json_path = write_reports(result, args)
 
@@ -106,6 +113,9 @@ def main() -> None:
     print(f"After dedupe: {result.stats.deduped_count}")
     print(f"Kept: {result.stats.kept_count}")
     print(f"AI refinement mode: {result.stats.refinement_mode}")
+    print(f"AI refined count: {result.stats.ai_refined_count}")
+    print(f"AI override count: {result.stats.ai_override_count}")
+    print(f"Source failed count: {result.stats.source_failed_count}")
     if markdown_path:
         print(f"Markdown report: {markdown_path}")
     print(f"JSON report: {json_path}")
@@ -118,31 +128,51 @@ def write_reports(result, args) -> tuple[Path | None, Path]:
     markdown_path = None if args.json_only else output_dir / f"ai_hotspots_{timestamp}.md"
     json_path = output_dir / f"ai_hotspots_{timestamp}.json"
 
-    records = [_to_record(item) for item in result.ranked_articles]
-    json_path.write_text(
-        json.dumps(
-            {
-                "generated_at": result.generated_at.isoformat(),
-                "resume_focus": result.profile.focus_summary,
-                "resume_terms": result.profile.salient_terms,
-                "stats": {
-                    "fetched_count": result.stats.fetched_count,
-                    "deduped_count": result.stats.deduped_count,
-                    "kept_count": result.stats.kept_count,
-                    "discarded_count": result.stats.discarded_count,
-                    "refinement_mode": result.stats.refinement_mode,
-                },
-                "items": records,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    payload = build_report_payload(result)
+    records = payload["items"]
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if markdown_path is not None:
         markdown_path.write_text(_build_markdown(result, records, args), encoding="utf-8")
     return markdown_path, json_path
+
+
+def build_report_payload(result) -> dict:
+    return {
+        "generated_at": result.generated_at.isoformat(),
+        "resume_focus": result.profile.focus_summary,
+        "resume_focus_terms": result.profile.focus_terms,
+        "resume_stack_terms": result.profile.stack_terms,
+        "rule_expanded_terms": result.profile.rule_expanded_terms,
+        "ai_expanded_terms": result.profile.ai_expanded_terms,
+        "expanded_resume_terms": result.profile.expanded_terms,
+        "resume_background_terms": result.profile.background_terms,
+        "excluded_resume_terms": result.profile.excluded_terms,
+        "stats": {
+            "fetched_count": result.stats.fetched_count,
+            "deduped_count": result.stats.deduped_count,
+            "kept_count": result.stats.kept_count,
+            "discarded_count": result.stats.discarded_count,
+            "refinement_mode": result.stats.refinement_mode,
+            "ai_error": result.stats.ai_error,
+            "degrade_reason": result.stats.degrade_reason,
+            "ai_refined_count": result.stats.ai_refined_count,
+            "ai_override_count": result.stats.ai_override_count,
+            "degraded_count": result.stats.degraded_count,
+            "source_failed_count": result.stats.source_failed_count,
+        },
+        "items": [_to_record(item) for item in result.ranked_articles],
+    }
+
+
+def build_markdown_report(result, payload: dict, sources_path: str, thresholds: dict[str, float]) -> str:
+    args = SimpleNamespace(
+        sources=sources_path,
+        min_relevance=thresholds["min_relevance"],
+        min_quality=thresholds["min_quality"],
+        heavyweight_impact=thresholds["heavyweight_impact"],
+    )
+    return _build_markdown(result, payload["items"], args)
 
 
 def _to_record(item) -> dict:
@@ -158,8 +188,12 @@ def _to_record(item) -> dict:
         "summary": item.generated_summary,
         "action_bucket": item.action_bucket,
         "retention_class": ai.retention_class if ai else _retention_class_from_bucket(item.action_bucket),
-        "content_kind": ai.content_kind if ai else "unknown",
+        "relevance_channel": item.relevance_channel,
+        "significance_type": item.significance_type,
+        "decision_source": item.decision_source,
+        "keep_reason_category": item.keep_reason_category,
         "matched_resume_terms": item.matched_resume_terms,
+        "matched_expanded_terms": item.matched_expanded_terms,
         "duplicate_count": item.duplicate_count,
         "topic_cluster_size": item.topic_cluster_size,
         "scores": {
@@ -179,11 +213,17 @@ def _to_record(item) -> dict:
             "depth": item.local_score.depth_score,
             "noise_penalty": item.local_score.noise_penalty,
             "discovery": item.local_score.discovery_score,
+            "direct_resume_relevance": item.local_score.direct_resume_relevance,
+            "ecosystem_significance": item.local_score.ecosystem_significance,
+            "expanded_term_score": item.local_score.expanded_term_score,
         },
         "embedding_score": item.embedding_score,
         "industry_heavyweight": ai.industry_heavyweight if ai else item.local_score.industry_heavyweight,
+        "technical_ecosystem_heavyweight": ai.technical_ecosystem_heavyweight if ai else item.local_score.technical_ecosystem_heavyweight,
+        "corporate_or_consumer_heavyweight": ai.corporate_or_consumer_heavyweight if ai else item.local_score.corporate_or_consumer_heavyweight,
         "tags": ai.tags if ai else article.tags,
         "ai_refined": ai is not None,
+        "ai_override": item.ai_override,
     }
 
 
@@ -193,10 +233,16 @@ def _build_markdown(result, records: list[dict], args) -> str:
         "",
         f"- Generated at: {result.generated_at.isoformat()}",
         f"- Resume focus: {result.profile.focus_summary}",
-        f"- Resume salient terms: {', '.join(result.profile.salient_terms[:18])}",
+        f"- Resume focus terms: {', '.join(result.profile.focus_terms[:12]) or 'none'}",
+        f"- Resume stack terms: {', '.join(result.profile.stack_terms[:12]) or 'none'}",
+        f"- Expanded resume terms: {', '.join(result.profile.expanded_terms[:18]) or 'none'}",
+        f"- Resume background terms: {', '.join(result.profile.background_terms[:12]) or 'none'}",
         f"- Sources config: {Path(args.sources).expanduser().resolve()}",
         f"- Fetched / deduped / kept: {result.stats.fetched_count} / {result.stats.deduped_count} / {result.stats.kept_count}",
         f"- AI refinement: {result.stats.refinement_mode}",
+        f"- AI refined / override / degraded / source failed: {result.stats.ai_refined_count} / {result.stats.ai_override_count} / {result.stats.degraded_count} / {result.stats.source_failed_count}",
+        f"- AI error: {result.stats.ai_error or 'none'}",
+        f"- Degrade reason: {result.stats.degrade_reason or 'none'}",
         f"- Thresholds: min_relevance={args.min_relevance}, min_quality={args.min_quality}, heavyweight_impact={args.heavyweight_impact}",
         "",
     ]
@@ -238,14 +284,21 @@ def _markdown_block(idx: int, item: dict) -> list[str]:
         f"- Keep reason: {item['keep_reason']}",
         f"- Action bucket: {item['action_bucket']}",
         f"- Retention class: {item['retention_class']}",
-        f"- Content kind: {item['content_kind']}",
+        f"- Relevance channel: {item['relevance_channel']}",
+        f"- Significance type: {item['significance_type']}",
+        f"- Decision source: {item['decision_source']}",
+        f"- Keep reason category: {item['keep_reason_category']}",
         f"- Source: {item['source_name']}",
         f"- Published: {item['published'] or 'unknown'}",
         f"- URL: {item['url']}",
         f"- Relevance / Impact / Quality / Discovery / Final: {item['scores']['relevance']} / {item['scores']['impact']} / {item['scores']['quality']} / {item['scores']['discovery']} / {item['scores']['final']}",
         f"- Embedding score: {item['embedding_score']}",
         f"- Matched CV terms: {', '.join(item['matched_resume_terms']) or 'none'}",
+        f"- Matched expanded terms: {', '.join(item['matched_expanded_terms']) or 'none'}",
         f"- Heavyweight event: {item['industry_heavyweight']}",
+        f"- Technical ecosystem heavyweight: {item['technical_ecosystem_heavyweight']}",
+        f"- Corporate or consumer heavyweight: {item['corporate_or_consumer_heavyweight']}",
+        f"- AI refined / override: {item['ai_refined']} / {item['ai_override']}",
         f"- Duplicate count: {item['duplicate_count']}",
         f"- Topic cluster size: {item['topic_cluster_size']}",
         "",

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SignalRank AI Report Viewer</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">SignalRank AI</p>
+          <h1 id="page-title">Report Viewer</h1>
+          <p id="page-subtitle" class="subtitle"></p>
+        </div>
+        <div class="hero-actions">
+          <label class="upload">
+            <input id="file-input" type="file" accept=".json,application/json" />
+            <span id="upload-label">Load JSON Report</span>
+          </label>
+          <button id="lang-toggle" type="button">中文</button>
+        </div>
+      </header>
+
+      <section class="panel" aria-labelledby="run-title">
+        <div class="panel-header">
+          <h2 id="run-title">Run Pipeline</h2>
+          <p id="run-meta" class="panel-meta"></p>
+        </div>
+        <form id="run-form">
+          <section class="form-section">
+            <div class="panel-subheader">
+              <h3 id="basic-settings-title"></h3>
+              <p id="basic-settings-help" class="panel-meta"></p>
+            </div>
+            <div class="run-form">
+              <label class="field field--wide">
+                <span id="resume-file-label">Resume File</span>
+                <input id="resume-file" name="resume_file" type="file" required />
+              </label>
+              <label>
+                <span id="sources-preset-label">Sources Preset</span>
+                <select id="sources-preset" name="sources_preset">
+                  <option value="curated">精选公开源</option>
+                  <option value="example">最小示例源</option>
+                  <option value="premium">Premium 占位源</option>
+                </select>
+              </label>
+              <label>
+                <span id="sources-file-label">Sources File</span>
+                <input id="sources-file" name="sources_file" type="file" accept=".json,application/json" />
+              </label>
+              <p id="sources-help" class="field-help field-help--wide"></p>
+            </div>
+          </section>
+
+          <section class="form-section">
+            <div class="panel-subheader">
+              <h3 id="run-scope-title"></h3>
+              <p id="run-scope-help" class="panel-meta"></p>
+            </div>
+            <div class="run-form">
+              <label>
+                <span id="ai-evaluate-label">AI Evaluate</span>
+                <select id="ai-evaluate" name="ai_evaluate">
+                  <option value="false">false</option>
+                  <option value="true">true</option>
+                </select>
+              </label>
+              <label>
+                <span id="per-source-limit-label">Per Source Limit</span>
+                <input id="per-source-limit" name="per_source_limit" type="number" value="8" min="1" />
+              </label>
+              <label>
+                <span id="top-n-label">Top N</span>
+                <input id="top-n" name="top_n" type="number" value="30" min="1" />
+              </label>
+            </div>
+          </section>
+        </form>
+
+        <section id="ai-settings" class="ai-settings">
+          <div class="panel-subheader">
+            <h3 id="ai-settings-title"></h3>
+            <p id="ai-settings-help" class="panel-meta"></p>
+          </div>
+          <div class="run-form">
+            <label>
+            <span id="ai-expand-resume-label">AI Expand Resume</span>
+            <select id="ai-expand-resume" name="ai_expand_resume">
+              <option value="false">false</option>
+              <option value="true">true</option>
+            </select>
+            </label>
+            <label>
+            <span id="generation-api-label">Generation API</span>
+            <select id="generation-api" name="generation_api">
+              <option value="responses">responses</option>
+              <option value="chat-completions">chat-completions</option>
+            </select>
+            </label>
+            <label>
+            <span id="ai-model-label">AI Model</span>
+            <input id="ai-model" name="ai_model" type="text" value="gpt-5-mini" />
+            </label>
+            <label>
+            <span id="embedding-model-label">Embedding Model</span>
+            <input id="embedding-model" name="embedding_model" type="text" value="text-embedding-3-small" />
+            </label>
+            <label>
+            <span id="chat-base-url-label">Chat Base URL</span>
+            <input id="chat-base-url" name="openai_base_url" type="text" placeholder="http://gateway/v1" />
+            </label>
+            <label>
+            <span id="embedding-base-url-label">Embedding Base URL</span>
+            <input id="embedding-base-url" name="embedding_base_url" type="text" placeholder="http://gateway/v1" />
+            </label>
+            <label>
+            <span id="chat-api-key-label">Chat API Key</span>
+            <input id="chat-api-key" name="openai_api_key" type="password" />
+            </label>
+            <label>
+            <span id="embedding-api-key-label">Embedding API Key</span>
+            <input id="embedding-api-key" name="embedding_api_key" type="password" />
+            </label>
+            <label>
+            <span id="chat-timeout-label">Chat Timeout</span>
+            <input id="chat-timeout" name="chat_timeout" type="number" value="300" min="1" />
+            </label>
+            <label>
+            <span id="embedding-timeout-label">Embedding Timeout</span>
+            <input id="embedding-timeout" name="embedding_timeout" type="number" value="60" min="1" />
+            </label>
+          </div>
+        </section>
+        <div class="run-actions">
+          <button id="run-button" type="button">Run</button>
+          <span id="run-status" class="panel-meta"></span>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="overview-title">
+        <div class="panel-header">
+          <h2 id="overview-title">Overview</h2>
+          <p id="report-meta" class="panel-meta"></p>
+        </div>
+        <div id="overview-grid" class="overview-grid"></div>
+      </section>
+
+      <section class="panel filters" aria-labelledby="filters-title">
+        <div class="panel-header">
+          <h2 id="filters-title">Filters</h2>
+        </div>
+        <div class="filter-grid">
+          <label>
+            <span id="filter-keep-label">Keep Status</span>
+            <select id="filter-keep"></select>
+          </label>
+          <label>
+            <span id="filter-channel-label">Relevance Channel</span>
+            <select id="filter-channel"></select>
+          </label>
+          <label>
+            <span id="filter-significance-label">Significance Type</span>
+            <select id="filter-significance"></select>
+          </label>
+          <label>
+            <span id="filter-ai-label">AI Refined</span>
+            <select id="filter-ai"></select>
+          </label>
+          <label>
+            <span id="filter-source-label">Source</span>
+            <select id="filter-source"></select>
+          </label>
+        </div>
+      </section>
+
+      <section class="content-grid">
+        <section class="panel list-panel" aria-labelledby="results-title">
+          <div class="panel-header">
+            <h2 id="results-title">Results</h2>
+            <p id="results-count" class="panel-meta"></p>
+          </div>
+          <div id="results-list" class="results-list"></div>
+        </section>
+
+        <aside class="panel detail-panel" aria-labelledby="detail-title">
+          <div class="panel-header">
+            <h2 id="detail-title">Details</h2>
+          </div>
+          <div id="detail-empty" class="empty-state"></div>
+          <div id="detail-view" class="detail-view hidden"></div>
+        </aside>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

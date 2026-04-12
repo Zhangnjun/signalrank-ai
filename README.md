@@ -46,7 +46,9 @@ SignalRank AI takes a different approach:
 - Optional OpenAI-compatible rerank:
   - embedding-based semantic rerank
   - LLM-based final structured judgment
-  - raw HTTP request path for enterprise gateways
+  - raw HTTP requests to OpenAI-compatible endpoints for enterprise gateways
+  - graceful degradation across `full`, `chat-only`, `local-only`, and `failed-fallback`
+- Offline report viewer for local JSON visualization
 - Markdown and JSON outputs for both human review and downstream automation
 
 ## Repository Layout
@@ -59,7 +61,12 @@ signalrank-ai/
 ├── sources.example.json
 ├── sources.curated.json
 ├── sources.premium.example.json
+├── viewer
+│   ├── app.js
+│   ├── index.html
+│   └── styles.css
 └── src/ai_hotspot_monitor
+    ├── api.py
     ├── cli.py
     ├── config.py
     ├── fetcher.py
@@ -95,6 +102,18 @@ Run a local-only pass:
 ai-hotspot-monitor \
   --resume ./path/to/resume.md \
   --sources ./sources.json
+```
+
+Run the interactive web UI:
+
+```bash
+signalrank-web
+```
+
+By default it starts at [http://127.0.0.1:8000](http://127.0.0.1:8000). You can override the bind address with:
+
+```bash
+SIGNALRANK_HOST=127.0.0.1 SIGNALRANK_PORT=8765 signalrank-web
 ```
 
 Run with AI rerank enabled:
@@ -144,6 +163,17 @@ ai-hotspot-monitor \
 
 If the embedding endpoint is unavailable or returns an error, the pipeline automatically falls back to `chat-only` refinement instead of exiting.
 
+Set explicit request timeouts when needed:
+
+```bash
+ai-hotspot-monitor \
+  --resume ./path/to/resume.md \
+  --sources ./sources.json \
+  --ai-evaluate \
+  --chat-timeout 300 \
+  --embedding-timeout 60
+```
+
 ## Source Configurations
 
 This repository includes three source presets:
@@ -168,27 +198,45 @@ Each record includes:
 
 - title, source, publish time, and URL
 - generated summary
+- layered resume profile output:
+  - `resume_focus_terms`
+  - `resume_stack_terms`
+  - `resume_background_terms`
+  - `excluded_resume_terms`
 - matched resume terms
 - local scores
 - final scores
 - optional embedding score
-- refinement mode: `disabled`, `chat-only`, or `full`
+- refinement mode: `disabled`, `chat-only`, `full`, `local-only`, or `failed-fallback`
+- degrade metadata:
+  - `ai_error`
+  - `degrade_reason`
+  - `ai_refined_count`
+  - `ai_override_count`
+  - `degraded_count`
+  - `source_failed_count`
 - keep decision and keep reason
+- explanation fields:
+  - `relevance_channel`
+  - `significance_type`
+  - `decision_source`
+  - `keep_reason_category`
 - retention class such as `resume-fit`, `industry-heavyweight`, `demo-potential`, or `interview-material`
-- content kind such as `infra-platform`, `agent-tooling`, `research-paper`, or `consumer-newsroom`
 - heavyweight-event flag
 
 ## How It Works
 
 ### 1. Resume Profiling
 
-The resume is normalized and converted into a lightweight profile:
+The resume is normalized and converted into a layered profile:
 
-- normalized text
-- salient terms
+- `resume_focus_terms`
+- `resume_stack_terms`
+- `resume_background_terms`
+- `excluded_resume_terms`
 - a short focus summary
 
-This allows the system to adapt to different CVs instead of using a fixed keyword list.
+Section headers, generic education terms, and weak platform names are separated instead of being mixed into the main relevance signal.
 
 ### 2. Collection and Cleanup
 
@@ -205,7 +253,9 @@ This helps avoid overweighting the same story across multiple sources.
 Each item is scored across multiple dimensions:
 
 - `relevance_score`
-  CV similarity using TF-IDF character features, term overlap, and title alignment.
+  Direct resume relevance using TF-IDF similarity, layered term overlap, and title alignment.
+- `ecosystem_significance`
+  Technical ecosystem spillover across infra, runtime, tooling, model ecosystem, and hardware categories.
 - `impact_score`
   Based on source authority, recency, topic resonance, and content depth.
 - `quality_score`
@@ -215,13 +265,17 @@ Each item is scored across multiple dimensions:
 
 ### 5. Retention Strategy
 
-An item can be retained for multiple reasons:
+An item can be retained through two channels:
 
-- it is strongly relevant to the CV
-- it is a heavyweight industry event
-- it is a strong discovery candidate with good quality and enough impact
+- `direct_resume_match`
+- `ecosystem_shift`
 
-This is intentionally broader than a strict relevance-only filter.
+Heavyweight logic is also split:
+
+- `technical_ecosystem_heavyweight`
+- `corporate_or_consumer_heavyweight`
+
+This keeps the system focused on personalized engineering signal instead of devolving into either simple keyword matching or generic big-tech news aggregation.
 
 ### 6. Optional AI Rerank
 
@@ -231,7 +285,11 @@ When `--ai-evaluate` is enabled:
 2. embeddings rerank the candidate pool semantically when available
 3. the top subset is sent to the LLM for structured final judgment
 
-If embeddings are unavailable, the pipeline degrades to `chat-only` mode and still completes.
+The runtime uses raw HTTP requests, not the OpenAI SDK. That makes enterprise gateway behavior more observable and easier to debug.
+
+If embeddings are unavailable, the pipeline degrades to `chat-only`.
+If some chat evaluations fail, those items keep their local ranking.
+If AI refinement fails globally, the pipeline still writes JSON and Markdown using local results.
 
 This makes the system much more practical than either:
 
@@ -256,8 +314,55 @@ This makes the system much more practical than either:
   Impact threshold for preserving major industry events.
 - `--ai-evaluate`
   Enables embedding rerank plus LLM refinement.
+- `--ai-expand-resume`
+  Adds an optional second expansion layer that uses the chat model to expand resume focus terms. If it fails, the pipeline falls back to rule-based expansion.
 - `--ai-candidate-pool`
   Number of locally recalled items to send through embeddings.
+- `--chat-timeout`
+  Timeout in seconds for chat generation requests.
+- `--embedding-timeout`
+  Timeout in seconds for embedding requests.
+
+## Offline Viewer
+
+The repository includes a lightweight offline viewer for local JSON reports:
+
+```bash
+open ./viewer/index.html
+```
+
+Or open [`viewer/index.html`](./viewer/index.html) directly in a browser.
+
+The page supports:
+
+- top-level report overview
+- result list with keep/discard status
+- filters for keep status, relevance channel, significance type, AI refined, and source
+- detail panel with scores, local scores, metadata, and AI override visibility
+- English / Chinese toggle
+
+## Interactive Web UI
+
+The same viewer can also run in interactive mode when served by the backend API.
+
+In this mode, the page can:
+
+- upload a resume file
+- choose a sources preset or upload a sources JSON file
+- configure AI flags, models, base URLs, API keys, and timeouts
+- trigger the pipeline through `POST /api/run`
+- render the returned report immediately
+
+The backend still does the real work:
+
+- feed collection
+- article cleanup
+- local scoring
+- embedding rerank
+- AI refinement
+- report file persistence under `./reports_web`
+
+The browser does not call model endpoints directly.
 - `--ai-top-k`
   Number of items to send to the LLM after embedding rerank.
 - `--embedding-api-key`

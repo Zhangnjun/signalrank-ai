@@ -55,6 +55,7 @@ class MonitorPipeline:
         top_n: int,
         ai_top_k: int,
         ai_candidate_pool: int,
+        ai_expand_resume: bool = False,
     ) -> MonitorResult:
         self.logger.info(
             "Pipeline run started: sources=%s per_source_limit=%s ai_enabled=%s",
@@ -63,7 +64,24 @@ class MonitorPipeline:
             self.ai_evaluator is not None,
         )
         profile = build_resume_profile(resume_text)
-        fetched_articles = self._fetch_all(sources, per_source_limit)
+        ai_error = ""
+        degrade_reason = ""
+        if ai_expand_resume and self.ai_evaluator:
+            try:
+                ai_expanded_terms = self.ai_evaluator.expand_resume_terms(profile)
+                if ai_expanded_terms:
+                    profile.ai_expanded_terms = ai_expanded_terms
+                    profile.expanded_terms = _merge_expanded_terms(profile.rule_expanded_terms, ai_expanded_terms)
+                    self.logger.info(
+                        "AI resume expansion completed: added=%s total_expanded=%s",
+                        len(ai_expanded_terms),
+                        len(profile.expanded_terms),
+                    )
+            except Exception as exc:
+                ai_error = str(exc)
+                degrade_reason = "ai resume expansion failed; using rule-based expansion only"
+                self.logger.warning("AI resume expansion failed, falling back to local expansion: %s", exc)
+        fetched_articles, source_failed_count = self._fetch_all(sources, per_source_limit)
         deduped_articles, duplicate_counts, topic_cluster_sizes = self._dedupe_articles(fetched_articles)
         self.logger.info(
             "Collection complete: fetched=%s deduped=%s",
@@ -75,7 +93,7 @@ class MonitorPipeline:
         for article in deduped_articles:
             canonical_key = article.url.strip() or article.title.strip()
             topic_key = fingerprint_title(article.title) or article.title.strip().lower()
-            local_score, matched_terms = score_article(
+            local_score, matched_terms, matched_expanded_terms = score_article(
                 profile=profile,
                 article=article,
                 duplicate_count=duplicate_counts.get(canonical_key, 1),
@@ -97,6 +115,7 @@ class MonitorPipeline:
                     topic_cluster_size=topic_cluster_sizes.get(topic_key, 1),
                     generated_summary=generate_summary(article),
                     matched_resume_terms=matched_terms,
+                    matched_expanded_terms=matched_expanded_terms,
                 )
             )
 
@@ -112,17 +131,29 @@ class MonitorPipeline:
         )
 
         refinement_mode = "disabled"
+        ai_refined_count = 0
+        ai_override_count = 0
+        degraded_count = 0
         if self.ai_evaluator:
             try:
-                refinement_mode = self.ai_evaluator.refine(
+                refine_result = self.ai_evaluator.refine(
                     profile=profile,
                     ranked=ranked,
                     ai_top_k=ai_top_k,
                     ai_candidate_pool=ai_candidate_pool,
                 )
+                refinement_mode = str(refine_result["mode"])
+                ai_error = ai_error or str(refine_result.get("ai_error", ""))
+                degrade_reason = degrade_reason or str(refine_result.get("degrade_reason", ""))
+                ai_refined_count = int(refine_result.get("ai_refined_count", 0))
+                ai_override_count = int(refine_result.get("ai_override_count", 0))
+                degraded_count = int(refine_result.get("degraded_count", 0))
                 self.logger.info("AI refinement completed with mode=%s", refinement_mode)
             except Exception as exc:
-                refinement_mode = "disabled"
+                refinement_mode = "failed-fallback"
+                ai_error = str(exc)
+                degrade_reason = "ai refine failed; local ranking preserved"
+                degraded_count = len(ranked)
                 self.logger.exception(
                     "AI refinement failed; falling back to local ranking only: error=%s",
                     exc,
@@ -152,21 +183,29 @@ class MonitorPipeline:
                 kept_count=kept,
                 discarded_count=max(0, len(ranked) - kept),
                 refinement_mode=refinement_mode,
+                ai_error=ai_error,
+                degrade_reason=degrade_reason,
+                ai_refined_count=ai_refined_count,
+                ai_override_count=ai_override_count,
+                degraded_count=degraded_count,
+                source_failed_count=source_failed_count,
             ),
             generated_at=datetime.now(timezone.utc),
         )
 
-    def _fetch_all(self, sources: list[Source], per_source_limit: int) -> list[Article]:
+    def _fetch_all(self, sources: list[Source], per_source_limit: int) -> tuple[list[Article], int]:
         articles: list[Article] = []
+        failed_count = 0
         for source in sources:
             try:
                 source_articles = self.fetcher.fetch(source, per_source_limit)
                 self.logger.info("Fetched source=%s count=%s", source.name, len(source_articles))
                 articles.extend(source_articles)
             except Exception as exc:
+                failed_count += 1
                 self.logger.warning("Source fetch failed: source=%s error=%s", source.name, exc)
                 continue
-        return articles
+        return articles, failed_count
 
     def _dedupe_articles(
         self, articles: list[Article]
@@ -231,6 +270,8 @@ class AiHotspotEvaluator:
         embedding_api_key: str | None = None,
         embedding_api_key_env: str = "OPENAI_EMBEDDING_API_KEY",
         embedding_base_url: str | None = None,
+        chat_timeout: int = 300,
+        embedding_timeout: int = 60,
         logger: logging.Logger | None = None,
     ) -> None:
         self.logger = logger or LOGGER
@@ -246,8 +287,8 @@ class AiHotspotEvaluator:
         self.chat_base_url = (chat_base_url or "").rstrip("/")
         self.embedding_api_key = embedding_api_key or os.getenv(embedding_api_key_env) or chat_api_key
         self.embedding_base_url = (embedding_base_url or chat_base_url or "").rstrip("/")
-        self.chat_timeout = 120
-        self.embedding_timeout = 60
+        self.chat_timeout = chat_timeout
+        self.embedding_timeout = embedding_timeout
         self.embedding_available = False
 
         if embedding_model and self.embedding_base_url and self.embedding_api_key:
@@ -263,6 +304,46 @@ class AiHotspotEvaluator:
             self.embedding_available,
         )
 
+    def expand_resume_terms(self, profile: ResumeProfile) -> list[str]:
+        instructions = (
+            "You are expanding a resume profile for AI engineering intelligence filtering. "
+            "Generate concise expansion terms from the resume focus and stack. "
+            "Prefer technical synonyms, engineering aliases, infrastructure/runtime terms, adjacent tooling terms, and scenario terms. "
+            "Do not repeat source terms. Do not return generic soft-skill words, education entities, or broad corporate words. "
+            "Return JSON only."
+        )
+        prompt = (
+            f"Resume focus summary: {profile.focus_summary}\n"
+            f"Focus terms: {', '.join(profile.focus_terms[:12])}\n"
+            f"Stack terms: {', '.join(profile.stack_terms[:12])}\n"
+            f"Background terms: {', '.join(profile.background_terms[:10])}\n"
+            f"Excluded terms: {', '.join(profile.excluded_terms[:12])}\n"
+            "Return at most 18 high-signal expansion terms."
+        )
+        schema = {
+            "type": "object",
+            "properties": {
+                "expanded_terms": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["expanded_terms"],
+            "additionalProperties": False,
+        }
+        payload = (
+            self._evaluate_via_chat_completions(instructions, prompt, schema)
+            if self.generation_api == "chat-completions"
+            else self._evaluate_via_responses(instructions, prompt, schema)
+        )
+        source_terms = {term.lower() for term in profile.focus_terms + profile.stack_terms + profile.rule_expanded_terms}
+        expanded: list[str] = []
+        for term in payload.get("expanded_terms", []):
+            normalized = normalize_text(str(term)).lower()
+            if not normalized or normalized in source_terms or normalized in expanded:
+                continue
+            expanded.append(normalized)
+            if len(expanded) >= 18:
+                break
+        return expanded
+
     def refine(
         self,
         *,
@@ -270,11 +351,23 @@ class AiHotspotEvaluator:
         ranked: list[RankedArticle],
         ai_top_k: int,
         ai_candidate_pool: int,
-    ) -> str:
+    ) -> dict[str, Any]:
         if not ranked:
-            return "disabled"
+            return {
+                "mode": "disabled",
+                "ai_error": "",
+                "degrade_reason": "",
+                "ai_refined_count": 0,
+                "ai_override_count": 0,
+                "degraded_count": 0,
+            }
 
         refinement_mode = "chat-only"
+        ai_error = ""
+        degrade_reason = ""
+        ai_refined_count = 0
+        ai_override_count = 0
+        degraded_count = 0
         candidate_pool = ranked[: max(ai_candidate_pool, ai_top_k)]
 
         if self.embedding_available:
@@ -285,9 +378,13 @@ class AiHotspotEvaluator:
                 self.logger.info("Embedding rerank completed successfully")
             except Exception as exc:
                 refinement_mode = "chat-only"
+                ai_error = str(exc)
+                degrade_reason = "embedding rerank failed; degraded to chat-only"
+                degraded_count += len(candidate_pool)
                 self.logger.warning("Embedding rerank failed, falling back to chat-only mode: %s", exc)
         else:
-            self.logger.info("Embedding rerank skipped because embedding client is unavailable")
+            degrade_reason = "embedding unavailable; chat-only refinement"
+            self.logger.info("Embedding rerank skipped because embedding configuration is unavailable")
 
         rerank_candidates = sorted(
             candidate_pool,
@@ -304,6 +401,10 @@ class AiHotspotEvaluator:
             try:
                 assessment = self.evaluate(profile, item)
             except Exception as exc:
+                if not ai_error:
+                    ai_error = str(exc)
+                degrade_reason = "one or more chat evaluations failed; kept local ranking for those items"
+                degraded_count += 1
                 self.logger.warning(
                     "Chat evaluation failed for article=%s url=%s error=%s; keeping local ranking for this item",
                     item.article.title,
@@ -312,6 +413,13 @@ class AiHotspotEvaluator:
                 )
                 continue
 
+            ai_refined_count += 1
+            ai_override = _assessment_overrides_local(item, assessment)
+            item.ai_override = ai_override
+            assessment.ai_override = ai_override
+            assessment.decision_source = "ai_override" if ai_override else ("hybrid" if item.embedding_applied else "hybrid")
+            if ai_override:
+                ai_override_count += 1
             item.ai_assessment = assessment
             item.final_relevance_score = assessment.relevance_score
             item.final_impact_score = assessment.impact_score
@@ -329,12 +437,23 @@ class AiHotspotEvaluator:
             if assessment.summary:
                 item.generated_summary = assessment.summary
         self.logger.info("Chat evaluation finished")
-        return refinement_mode
+        if ai_refined_count == 0:
+            refinement_mode = "local-only"
+            if not degrade_reason:
+                degrade_reason = "ai refinement requested but no item was successfully refined"
+        return {
+            "mode": refinement_mode,
+            "ai_error": ai_error,
+            "degrade_reason": degrade_reason,
+            "ai_refined_count": ai_refined_count,
+            "ai_override_count": ai_override_count,
+            "degraded_count": degraded_count,
+        }
 
     def apply_embedding_rerank(self, profile: ResumeProfile, ranked_articles: list[RankedArticle]) -> None:
         if not ranked_articles or not self.embedding_available:
             raise RuntimeError("Embedding rerank is not configured")
-        texts = [profile.raw_text[:7000]]
+        texts = [_profile_embedding_text(profile)]
         texts.extend(_embedding_text(item.article) for item in ranked_articles)
         payload = {"model": self.embedding_model, "input": texts}
         response_payload = self._post_json(
@@ -351,6 +470,7 @@ class AiHotspotEvaluator:
         for item, vector in zip(ranked_articles, article_vectors):
             embedding_score = round(_cosine_similarity(resume_vector, vector) * 100.0, 2)
             item.embedding_score = embedding_score
+            item.embedding_applied = True
             item.final_relevance_score = round(
                 0.65 * item.final_relevance_score + 0.35 * embedding_score,
                 2,
@@ -373,17 +493,22 @@ class AiHotspotEvaluator:
         article = ranked_article.article
         instructions = (
             "You are ranking AI industry hotspots for an engineer. "
-            "Judge a single article on three axes: resume relevance, industry impact, and content quality. "
-            "Avoid hand-written keyword heuristics. Infer from the resume direction, article substance, source authority, and likely engineering value. "
-            "Classify the article content kind before deciding keep. Use one of: infra-platform, agent-tooling, research-paper, enterprise-product, consumer-newsroom, market-commentary, other. "
-            "Use one retention class from: resume-fit, industry-heavyweight, demo-potential, interview-material, watchlist. "
-            "Consumer-newsroom content, creator features, messaging product updates, and general audience product news should be demoted unless they clearly change the AI engineering landscape. "
-            "If the article is mostly hype, market noise, or has weak technical substance, lower quality sharply. "
-            "Keep globally important AI events even if resume relevance is low. Return JSON only."
+            "Judge a single article on resume relevance, AI engineering ecosystem significance, industry impact, and content quality. "
+            "Avoid fixed keyword matching. Infer from the resume profile, article substance, source authority, and likely engineering value. "
+            "Classify significance_type using one of: infra-platform, serving-runtime, open-source-tooling, model-ecosystem, ai-hardware, consumer-newsroom, policy-commentary, generic-corporate-pr. "
+            "Classify relevance_channel using one of: direct_resume_match, ecosystem_shift, hybrid, weak_match. "
+            "Classify keep_reason_category using one of: resume_relevant, ecosystem_heavyweight, both, discard. "
+            "Set technical_ecosystem_heavyweight true only for ecosystem-level technical shifts. "
+            "Set corporate_or_consumer_heavyweight true for large company, policy, or consumer announcements that are not inherently technical ecosystem shifts. "
+            "Consumer newsroom, policy commentary, and generic corporate PR should be demoted unless there is clear technical spillover into AI engineering workflows. "
+            "Use 0-100 scores. Return JSON only."
         )
         prompt = (
             f"Resume focus summary: {profile.focus_summary}\n"
-            f"Resume salient terms: {', '.join(profile.salient_terms[:18])}\n\n"
+            f"Resume focus terms: {', '.join(profile.focus_terms[:12])}\n"
+            f"Resume stack terms: {', '.join(profile.stack_terms[:12])}\n"
+            f"Expanded resume terms: {', '.join(profile.expanded_terms[:18])}\n"
+            f"Resume background terms: {', '.join(profile.background_terms[:10])}\n\n"
             f"Article title: {article.title}\n"
             f"Source: {article.source_name}\n"
             f"Published: {article.published}\n"
@@ -392,6 +517,13 @@ class AiHotspotEvaluator:
             f"Local impact score: {ranked_article.local_score.impact_score}\n"
             f"Local quality score: {ranked_article.local_score.quality_score}\n"
             f"Local discovery score: {ranked_article.local_score.discovery_score}\n"
+            f"Local direct resume relevance: {ranked_article.local_score.direct_resume_relevance}\n"
+            f"Local ecosystem significance: {ranked_article.local_score.ecosystem_significance}\n"
+            f"Local relevance channel: {ranked_article.local_score.relevance_channel}\n"
+            f"Local significance type: {ranked_article.local_score.significance_type}\n"
+            f"Local keep reason category: {ranked_article.local_score.keep_reason_category}\n"
+            f"Matched resume terms: {', '.join(ranked_article.matched_resume_terms[:10])}\n"
+            f"Matched expanded terms: {', '.join(ranked_article.matched_expanded_terms[:10])}\n"
             f"Embedding score: {ranked_article.embedding_score}\n"
             f"Topic cluster size: {ranked_article.topic_cluster_size}\n"
             f"Duplicate count: {ranked_article.duplicate_count}\n\n"
@@ -404,12 +536,16 @@ class AiHotspotEvaluator:
                 "keep": {"type": "boolean"},
                 "keep_reason": {"type": "string"},
                 "retention_class": {"type": "string"},
-                "content_kind": {"type": "string"},
+                "significance_type": {"type": "string"},
+                "relevance_channel": {"type": "string"},
+                "keep_reason_category": {"type": "string"},
                 "relevance_score": {"type": "number"},
                 "impact_score": {"type": "number"},
                 "quality_score": {"type": "number"},
                 "discovery_score": {"type": "number"},
                 "industry_heavyweight": {"type": "boolean"},
+                "technical_ecosystem_heavyweight": {"type": "boolean"},
+                "corporate_or_consumer_heavyweight": {"type": "boolean"},
                 "summary": {"type": "string"},
                 "tags": {"type": "array", "items": {"type": "string"}},
             },
@@ -417,12 +553,16 @@ class AiHotspotEvaluator:
                 "keep",
                 "keep_reason",
                 "retention_class",
-                "content_kind",
+                "significance_type",
+                "relevance_channel",
+                "keep_reason_category",
                 "relevance_score",
                 "impact_score",
                 "quality_score",
                 "discovery_score",
                 "industry_heavyweight",
+                "technical_ecosystem_heavyweight",
+                "corporate_or_consumer_heavyweight",
                 "summary",
                 "tags",
             ],
@@ -436,13 +576,18 @@ class AiHotspotEvaluator:
             keep=bool(payload["keep"]),
             keep_reason=payload["keep_reason"],
             retention_class=payload["retention_class"],
-            content_kind=payload["content_kind"],
-            relevance_score=round(float(payload["relevance_score"]), 2),
-            impact_score=round(float(payload["impact_score"]), 2),
-            quality_score=round(float(payload["quality_score"]), 2),
-            discovery_score=round(float(payload["discovery_score"]), 2),
+            significance_type=payload["significance_type"],
+            relevance_channel=payload["relevance_channel"],
+            keep_reason_category=payload["keep_reason_category"],
+            decision_source="hybrid",
+            relevance_score=round(_normalize_ai_score(payload["relevance_score"]), 2),
+            impact_score=round(_normalize_ai_score(payload["impact_score"]), 2),
+            quality_score=round(_normalize_ai_score(payload["quality_score"]), 2),
+            discovery_score=round(_normalize_ai_score(payload["discovery_score"]), 2),
             embedding_score=ranked_article.embedding_score,
             industry_heavyweight=bool(payload["industry_heavyweight"]),
+            technical_ecosystem_heavyweight=bool(payload["technical_ecosystem_heavyweight"]),
+            corporate_or_consumer_heavyweight=bool(payload["corporate_or_consumer_heavyweight"]),
             summary=payload["summary"],
             tags=payload["tags"],
         )
@@ -557,6 +702,31 @@ def _embedding_text(article: Article) -> str:
     )
 
 
+def _profile_embedding_text(profile: ResumeProfile) -> str:
+    return (
+        f"Resume focus: {profile.focus_summary}\n"
+        f"Focus terms: {', '.join(profile.focus_terms[:12])}\n"
+        f"Stack terms: {', '.join(profile.stack_terms[:12])}\n"
+        f"Expanded terms: {', '.join(profile.expanded_terms[:18])}\n"
+        f"Background terms: {', '.join(profile.background_terms[:10])}\n"
+        f"Resume text: {profile.raw_text[:5000]}"
+    )
+
+
+def _merge_expanded_terms(rule_terms: list[str], ai_terms: list[str], max_terms: int = 36) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for term in rule_terms + ai_terms:
+        normalized = normalize_text(term).lower()
+        if not normalized or normalized in seen:
+            continue
+        merged.append(normalized)
+        seen.add(normalized)
+        if len(merged) >= max_terms:
+            break
+    return merged
+
+
 def _cosine_similarity(left: list[float], right: list[float]) -> float:
     if not left or not right or len(left) != len(right):
         return 0.0
@@ -571,13 +741,36 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
 def _action_bucket(item: RankedArticle) -> str:
     if not item.keep:
         return "watchlist"
-    if item.final_relevance_score >= 55 and item.final_quality_score >= 60:
+    if item.keep_reason_category == "both" or (
+        item.final_relevance_score >= 55 and item.final_quality_score >= 60
+    ):
         return "worth-reading-now"
-    if item.final_relevance_score >= 40 and item.final_quality_score >= 55:
+    if item.keep_reason_category == "resume_relevant" or (
+        item.final_relevance_score >= 40 and item.final_quality_score >= 55
+    ):
         return "demo-candidate"
-    if item.final_impact_score >= 75 or item.local_score.industry_heavyweight:
+    if item.keep_reason_category == "ecosystem_heavyweight" or item.final_impact_score >= 75:
         return "industry-watch"
     return "watchlist"
+
+
+def _assessment_overrides_local(item: RankedArticle, assessment: AiAssessment) -> bool:
+    if assessment.keep != item.local_score.keep:
+        return True
+    if assessment.keep_reason_category != item.local_score.keep_reason_category:
+        return True
+    if assessment.relevance_channel != item.local_score.relevance_channel:
+        return True
+    if assessment.significance_type != item.local_score.significance_type:
+        return True
+    return False
+
+
+def _normalize_ai_score(value: Any) -> float:
+    score = float(value)
+    if 0.0 <= score <= 10.0:
+        return score * 10.0
+    return score
 
 
 def _normalized_title(title: str) -> str:
